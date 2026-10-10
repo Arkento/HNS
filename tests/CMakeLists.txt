@@ -78,6 +78,7 @@ qt_add_resources(WebServerTests "web_assets"
         "${CMAKE_SOURCE_DIR}/resources/web/app.js"
         "${CMAKE_SOURCE_DIR}/resources/web/style.css"
         "${CMAKE_SOURCE_DIR}/resources/web/apple-touch-icon.png"
+        "${CMAKE_SOURCE_DIR}/resources/web/service-worker.js"
 )
 set_target_properties(WebServerTests PROPERTIES AUTOMOC ON)
 add_test(NAME WebServerTests COMMAND WebServerTests)

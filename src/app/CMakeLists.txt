@@ -41,6 +41,7 @@ qt_add_resources(njulms_app "web_assets"
         "${CMAKE_SOURCE_DIR}/resources/web/app.js"
         "${CMAKE_SOURCE_DIR}/resources/web/style.css"
         "${CMAKE_SOURCE_DIR}/resources/web/apple-touch-icon.png"
+        "${CMAKE_SOURCE_DIR}/resources/web/service-worker.js"
 )
 
 target_link_libraries(njulms_app

@@ -47,6 +47,7 @@ const Asset kAssets[] = {
     {"/app.js", ":/web/app.js", "application/javascript; charset=utf-8"},
     {"/style.css", ":/web/style.css", "text/css; charset=utf-8"},
     {"/apple-touch-icon.png", ":/web/apple-touch-icon.png", "image/png"},
+    {"/service-worker.js", ":/web/service-worker.js", "application/javascript; charset=utf-8"},
 };
 
 void writeJson(httplib::Response &res, const QJsonObject &root, int status)
@@ -262,12 +263,17 @@ bool WebServer::start(quint16 port, QString *errorOut)
         const QString path = it.key();
         const QByteArray body = it.value();
         const QString type = d->contentTypes.value(path);
+        // Service Worker 脚本不能用 no-store：浏览器要求它能被缓存/复验，
+        // 否则注册会被拒绝（这里用 no-cache = 可缓存但每次都必须回源校验）。
+        const bool isServiceWorker = path == QLatin1String("/service-worker.js");
         d->server.Get(path.toStdString(),
-                      [body, type](const httplib::Request &, httplib::Response &res) {
+                      [body, type, isServiceWorker](const httplib::Request &,
+                                                    httplib::Response &res) {
                           res.set_content(
                               std::string(body.constData(), static_cast<size_t>(body.size())),
                               type.toStdString());
-                          res.set_header("Cache-Control", "no-store");
+                          res.set_header("Cache-Control",
+                                         isServiceWorker ? "no-cache" : "no-store");
                       });
     }
 

@@ -171,6 +171,10 @@ private slots:
         const auto icon = httpGet(server.port(), QStringLiteral("/apple-touch-icon.png"));
         QCOMPARE(icon.first, 200);
         QVERIFY(icon.second.startsWith("\x89PNG"));
+        // 离线外壳：PC 没开着时页面也能打开
+        const auto worker = httpGet(server.port(), QStringLiteral("/service-worker.js"));
+        QCOMPARE(worker.first, 200);
+        QVERIFY(worker.second.contains("CACHE_NAME"));
 
         // 未注册路径
         const auto missing = httpGet(server.port(), QStringLiteral("/api/does-not-exist"));

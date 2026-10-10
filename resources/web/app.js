@@ -30,6 +30,10 @@ const state = {
   openCourses: new Set(),
   lastOkAt: Date.now(),
   lastListsAt: 0,
+  /// 是否成功拉到过作业列表（决定断线时是显示占位说明还是保留旧数据）
+  listsLoaded: false,
+  /// 是否成功连上过后端（决定断线提示是"立刻"还是"等几秒"）
+  connectedOnce: false,
   timer: null,
   busy: false,
   /// 上一帧看到的那次运行：{ id, running }。用来识别"采集刚结束"
@@ -73,7 +77,7 @@ async function api(path, options = {}) {
   try {
     response = await fetch(path, init);
   } catch (error) {
-    throw new ApiError('无法连接 PC 上的采集器', 0);
+    throw new ApiError('请求失败（Failed to fetch）', 0);
   }
 
   const payload = await response.json().catch(() => null);
@@ -401,8 +405,32 @@ async function loadLists(force) {
   ]);
   state.pending = pending;
   state.submitted = submitted;
+  state.listsLoaded = true;   // 之后即使断线也保留最后一次的数据
   renderPending();
   renderSubmitted();
+}
+
+/**
+ * 后端连不上时的占位文案。
+ *
+ * 场景：PC 上的程序还没打开就先打开了这个网页 app。因为页面外壳由 Service Worker
+ * 缓存着，页面本身能正常显示 —— 这里把两个列表换成明确的说明，而不是停在
+ * "正在读取…"上；后端一起来，下一轮轮询就会自动填上数据，不需要重开网页 app。
+ * 如果之前已经成功加载过数据，则保留旧内容（不要在断线时清空）。
+ */
+function renderOfflinePlaceholders() {
+  if (state.listsLoaded) {
+    return;
+  }
+  const hint = '<p class="empty">连不上 PC 上的采集器。<br>'
+    + '请确认电脑上的程序正在运行（托盘里有它的图标）。<br>'
+    + '程序启动后本页会自动刷新，不需要重开。</p>';
+  el('pending-list').innerHTML = hint;
+  el('submitted-list').innerHTML = hint;
+  el('pending-meta').textContent = '';
+  el('submitted-meta').textContent = '';
+  el('last-run').textContent = '尚未连接';
+  el('next-run').textContent = '尚未连接';
 }
 
 /**
@@ -419,8 +447,10 @@ async function tick(force) {
   try {
     data = await api('/api/status');
   } catch (error) {
-    setLinkBadge(Date.now() - state.lastOkAt > OFFLINE_AFTER_MS);
+    // 从没连上过就立刻亮红标；连上过则要连续失败超过阈值才提示（避免抖动）
+    setLinkBadge(!state.connectedOnce || Date.now() - state.lastOkAt > OFFLINE_AFTER_MS);
     el('sync-status').textContent = `无法连接 PC 上的采集器：${error.message}`;
+    renderOfflinePlaceholders();
     return false;
   }
 
@@ -434,6 +464,7 @@ async function tick(force) {
                        && (runId !== previous.id || previous.running);
 
   renderStatus(data);
+  state.connectedOnce = true;
   state.lastOkAt = Date.now();
   setLinkBadge(false);
 
@@ -726,6 +757,15 @@ document.addEventListener('visibilitychange', () => {
 applyFontSize(state.fontSize);
 refreshTokenState();
 selectTab(new URLSearchParams(location.search).get('tab') || state.tab);
+
+// 注册离线外壳：让"PC 上的程序没开"时页面也能打开（显示连不上、等后端回来自动恢复）
+if ('serviceWorker' in navigator
+    && (location.protocol === 'https:'
+        || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+  navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' })
+    .catch(() => { /* 注册失败不影响正常使用 */ });
+}
+
 el('about-line').textContent =
   `本页地址：${location.origin}/（仅 Tailscale 内网可见）· 只读接口 + 令牌保护的写操作`;
 // 资源版本：用来确认 iPad 上跑的是不是最新前端（旧页面会一直停在旧哈希上）
