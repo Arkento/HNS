@@ -341,9 +341,9 @@ main {
 /* 类型胶囊标签：放每张卡片最前端；作业绿 / 考试紫 / 其它中性灰（用户指定） */
 .tag {
   flex-shrink: 0;
-  padding: 0.16rem 0.62rem;
+  padding: 0.26rem 0.85rem;
   border-radius: 999px;
-  font-size: 0.72rem;
+  font-size: 0.86rem;
   font-weight: 600;
   line-height: 1.45;
   white-space: nowrap;
