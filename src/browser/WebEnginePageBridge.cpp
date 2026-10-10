@@ -388,6 +388,11 @@ QWebEngineView *WebEnginePageBridge::view() const
     return d->view;
 }
 
+QWebEngineProfile *WebEnginePageBridge::profile() const
+{
+    return d->profile.data();
+}
+
 void WebEnginePageBridge::loadHome()
 {
     loadPath(QString());

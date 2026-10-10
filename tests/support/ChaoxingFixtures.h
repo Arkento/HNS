@@ -22,6 +22,9 @@ QString workListMixedStatuses();
 /// 列表页改版后的模样：没有任何作业条目（解析器必须返回空 + ParseIssue，而不是猜）
 QString workListTemplateChanged();
 
+/// 权威空列表：页面明确写着「暂无作业」（解析器不应记 Missing，上层可安全软删旧数据）
+QString workListEmptyState();
+
 } // namespace chaoxing_fixtures
 } // namespace test
 } // namespace njulms

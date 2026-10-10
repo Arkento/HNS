@@ -109,6 +109,10 @@ if(NJULMS_BUILD_GUI)
         ${CMAKE_SOURCE_DIR}/src/web/WebServer.h
         ${CMAKE_SOURCE_DIR}/src/browser/WebEnginePageBridge.cpp
         ${CMAKE_SOURCE_DIR}/src/browser/WebEnginePageBridge.h
+        ${CMAKE_SOURCE_DIR}/src/adapters/ChaoxingAdapter.cpp
+        ${CMAKE_SOURCE_DIR}/src/adapters/ChaoxingAdapter.h
+        ${CMAKE_SOURCE_DIR}/src/sync/ChaoxingSyncRunner.cpp
+        ${CMAKE_SOURCE_DIR}/src/sync/ChaoxingSyncRunner.h
     )
     target_include_directories(MainWindowSmokeTests PRIVATE
         ${CMAKE_SOURCE_DIR}/src

@@ -113,6 +113,24 @@ private:
     /// 隐藏登录窗口（登录成功后自动调用；只隐藏，不销毁页面）
     void hideLoginWindow();
 
+    // ---- 学习通（超星）----
+
+    /// 创建学习通适配器、同步运行器与登录窗口并接线。
+    /// 必须在浏览器 Profile 初始化成功之后调用（需要共享同一个 Profile）。
+    void setupChaoxing();
+
+    /// 南大同步结束后串行触发学习通采集（开关关闭 / 正在运行 / 未初始化时跳过）
+    void maybeStartChaoxingSync();
+
+    /// 学习通采集是否正在运行
+    bool chaoxingBusy() const;
+
+    /// 显示学习通登录窗口（会话失效、需要扫码时调用）
+    void showChaoxingLoginWindow(const QString &reason);
+
+    /// 隐藏学习通登录窗口（采集成功说明会话有效）
+    void hideChaoxingLoginWindow();
+
     /// 读取界面上的定时周期设置
     int configuredIntervalMinutes() const;
 

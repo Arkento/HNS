@@ -219,9 +219,16 @@ QList<Assignment> ChaoxingParser::parseWorkList(const QString &html, const QStri
     }
 
     if (assignments.isEmpty() && issues != nullptr) {
-        issues->append(ParseIssue(QStringLiteral("chaoxing.worklist"),
-                                  QStringLiteral("no work items found (template changed, empty list, or not logged in)"),
-                                  FieldState::Missing));
+        // 显式空列表（页面写明"暂无作业"）是权威结论：不再记 Missing，
+        // 让上层把它当作"确实没有作业"处理（可以安全地软删本课程的历史条目）。
+        static const QRegularExpression emptyRe(
+            QStringLiteral("暂无作业|null-data"));
+        if (!emptyRe.match(html).hasMatch()) {
+            issues->append(ParseIssue(
+                QStringLiteral("chaoxing.worklist"),
+                QStringLiteral("no work items found (template changed, empty list, or not logged in)"),
+                FieldState::Missing));
+        }
     }
     return assignments;
 }

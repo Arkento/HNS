@@ -148,6 +148,20 @@ private slots:
         QCOMPARE(issues.size(), 1);
         QCOMPARE(issues.first().state, FieldState::Missing);
     }
+
+    void workList_explicitEmptyStateIsAuthoritative()
+    {
+        ParseIssues issues;
+        const QList<Assignment> items =
+            ChaoxingParser::parseWorkList(chaoxing_fixtures::workListEmptyState(),
+                                          QStringLiteral("111111111-222222222"), observedAt(),
+                                          &issues);
+
+        QVERIFY(items.isEmpty());
+        // 页面明确写着「暂无作业」= 权威的空列表，不记 Missing；
+        // 否则上层会把它当成"读不出内容"，永远无法软删已经消失的旧作业。
+        QVERIFY2(issues.isEmpty(), qPrintable(issues.value(0).reason));
+    }
 };
 
 QTEST_MAIN(ChaoxingParserTests)

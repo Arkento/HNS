@@ -1,7 +1,9 @@
 #include "MainWindow.h"
 
 #include "auth/AuthManager.h"
+#include "adapters/ChaoxingAdapter.h"
 #include "parser/AssignmentParser.h"
+#include "sync/ChaoxingSyncRunner.h"
 #include "ui/UiTheme.h"
 #include "utils/Logger.h"
 #include "utils/Redact.h"
@@ -81,6 +83,8 @@ constexpr auto kWebPortKey = "web/port";
 constexpr auto kWebTokenKey = "web/token";
 /// 设置键：是否用活动接口补全作业说明（每门课多 1 个请求，只补正文不改记录）
 constexpr auto kEnrichDescriptionsKey = "sync/enrichDescriptions";
+/// 设置键：同步时是否一并采集学习通（超星）；与南大共用同一份定时周期配置
+constexpr auto kChaoxingEnabledKey = "sync/chaoxingEnabled";
 
 QSettings makeAppSettings()
 {
@@ -250,8 +254,21 @@ enum Column {
     ColPublished,
     ColScore,
     ColSourceId,
+    ColSource,
     ColumnCount,
 };
+
+/// 来源键 → 界面标签（多站点混排时显示在课程表 / 作业表 / iPad 卡片上）
+QString sourceDisplay(const QString &source)
+{
+    if (source == QLatin1String("nju-lms")) {
+        return QStringLiteral("南大");
+    }
+    if (source == QLatin1String("chaoxing")) {
+        return QStringLiteral("学习通");
+    }
+    return source.isEmpty() ? QStringLiteral("未知") : source;
+}
 
 QString formatTime(const Observed<QDateTime> &value)
 {
@@ -326,15 +343,21 @@ QJsonObject assignmentRow(const Course &course, const Assignment &item, bool wit
     row.insert(QStringLiteral("publishedAt"), formatTime(item.publishedAt));
     row.insert(QStringLiteral("score"), formatScore(item.score));
     row.insert(QStringLiteral("sourceId"), item.sourceId);
+    // 多站点：来源键（机器读） + 来源标签（直接显示）
+    row.insert(QStringLiteral("source"), course.source);
+    row.insert(QStringLiteral("sourceLabel"), sourceDisplay(course.source));
 
     // 原站详情链接（前端那个「↗」按钮用）。
-    // 只放行 https + 南大域名：详情链接是按站点路由推导出来的，
-    // 万一哪天解析出别的域名，也不该变成前端一个"点一下就跳走"的任意链接。
+    // 只放行 https + 已知站点域名（南大 / 学习通）：详情链接是按站点路由
+    // 推导或从页面提取的，万一哪天解析出别的域名，也不该变成前端一个
+    // "点一下就跳走"的任意链接。
     if (item.detailUrl.hasValue()) {
         const QUrl url(item.detailUrl.require());
         const QString host = url.host();
         const bool allowedHost =
-            host == QLatin1String("nju.edu.cn") || host.endsWith(QLatin1String(".nju.edu.cn"));
+            host == QLatin1String("nju.edu.cn") || host.endsWith(QLatin1String(".nju.edu.cn"))
+            || host == QLatin1String("chaoxing.com")
+            || host.endsWith(QLatin1String(".chaoxing.com"));
         if (url.isValid() && url.scheme() == QLatin1String("https") && allowedHost) {
             row.insert(QStringLiteral("detailUrl"), url.toString());
         }
@@ -369,6 +392,9 @@ public:
     std::unique_ptr<SyncManager> sync;
     std::unique_ptr<Scheduler> scheduler;
     std::unique_ptr<AuthManager> auth;
+    /// 学习通（超星）：页面驱动采集，与主页面共享同一个持久化 Profile
+    std::unique_ptr<ChaoxingAdapter> chaoxing;
+    std::unique_ptr<ChaoxingSyncRunner> chaoxingSync;
 
     // 界面
     QTabWidget *tabs = nullptr;
@@ -394,6 +420,8 @@ public:
     QCheckBox *quickIncremental = nullptr;
     /// v2：启动时自动全量扫描开关
     QCheckBox *startupFullScan = nullptr;
+    /// v2：同步时一并采集学习通（超星）
+    QCheckBox *chaoxingEnabled = nullptr;
 
     // 数据标签页
     QTableWidget *courseTable = nullptr;
@@ -408,6 +436,8 @@ public:
 
     // v2：登录窗口（浏览器页面独立成窗口，默认隐藏）
     LoginWindow *loginWindow = nullptr;
+    /// 学习通登录窗口（扫码后才弹出；登录成功后自动隐藏）
+    LoginWindow *chaoxingLoginWindow = nullptr;
 
     // 日志标签页
     QPlainTextEdit *logView = nullptr;
@@ -423,6 +453,9 @@ public:
 
     // v2：启动后的第一次自动动作（全量扫描 / 会话检查）是否已触发过
     bool startupActionDone = false;
+
+    /// 最近一次南大同步的模式：决定学习通跟随跑 full 还是 incremental 记录
+    SyncManager::Mode lastSyncMode = SyncManager::Mode::Incremental;
 };
 
 // ---------------------------------------------------------------------------
@@ -493,6 +526,9 @@ MainWindow::MainWindow(QWidget *parent)
         appendLog(QStringLiteral("正在自动打开智汇南雍…"));
         d->bridge->loadHome();
     }
+
+    // ---- 学习通（超星）：适配器 + 同步运行器（与主页面共享持久化 Profile）----
+    setupChaoxing();
 
     // ---- 启动状态检查：识别上次未完成的任务与是否需要补一次同步 ----
     QString startupSummary;
@@ -606,6 +642,8 @@ QJsonObject MainWindow::buildStatusJson() const
     QJsonObject sync;
     sync.insert(QStringLiteral("running"), d->sync->isRunning());
     sync.insert(QStringLiteral("paused"), d->sync->isPaused());
+    // 学习通阶段的运行状态单独给出：iPad 上"正在采集学习通"也要看得到
+    sync.insert(QStringLiteral("chaoxingRunning"), chaoxingBusy());
     sync.insert(QStringLiteral("percent"), d->progress->value());
     sync.insert(QStringLiteral("currentIndex"), d->sync->currentCourseIndex());
     sync.insert(QStringLiteral("total"), d->sync->totalCourses());
@@ -628,10 +666,11 @@ QJsonObject MainWindow::buildStatusJson() const
     settings.insert(QStringLiteral("startupFullScan"), d->startupFullScan->isChecked());
     settings.insert(QStringLiteral("enrichDescriptions"),
                     d->sync->config().enrichDescriptions);
+    settings.insert(QStringLiteral("chaoxingEnabled"), d->chaoxingEnabled->isChecked());
     root.insert(QStringLiteral("settings"), settings);
 
     // 前端的写操作能不能做：完全由桌面端此刻的状态决定（同一份真相）
-    const bool running = d->sync->isRunning();
+    const bool running = d->sync->isRunning() || chaoxingBusy();
     const bool paused = d->sync->isPaused();
     QJsonObject capabilities;
     capabilities.insert(QStringLiteral("canStartSync"), !running);
@@ -805,7 +844,7 @@ QString MainWindow::webAccessToken()
  */
 WebActionResult MainWindow::applyWebSettings(const QJsonObject &patch)
 {
-    const bool running = d->sync->isRunning();
+    const bool running = d->sync->isRunning() || chaoxingBusy();
     const bool touchesSchedule = patch.contains(QStringLiteral("scheduleEnabled"))
                                  || patch.contains(QStringLiteral("scheduleIntervalMinutes"));
     if (running && touchesSchedule) {
@@ -842,6 +881,9 @@ WebActionResult MainWindow::applyWebSettings(const QJsonObject &patch)
     if (patch.contains(QStringLiteral("startupFullScan"))) {
         d->startupFullScan->setChecked(patch.value(QStringLiteral("startupFullScan")).toBool());
     }
+    if (patch.contains(QStringLiteral("chaoxingEnabled"))) {
+        d->chaoxingEnabled->setChecked(patch.value(QStringLiteral("chaoxingEnabled")).toBool());
+    }
     if (patch.contains(QStringLiteral("enrichDescriptions"))) {
         const bool on = patch.value(QStringLiteral("enrichDescriptions")).toBool();
         makeAppSettings().setValue(QString::fromLatin1(kEnrichDescriptionsKey), on);
@@ -863,7 +905,7 @@ WebActionResult MainWindow::applyWebSettings(const QJsonObject &patch)
  */
 WebActionResult MainWindow::startWebSync(const QString &mode)
 {
-    if (d->sync->isRunning()) {
+    if (d->sync->isRunning() || chaoxingBusy()) {
         return WebActionResult{false, 409, QStringLiteral("已有同步任务在运行"), {}};
     }
 
@@ -916,10 +958,15 @@ WebActionResult MainWindow::resumeWebSync()
 
 WebActionResult MainWindow::cancelWebSync()
 {
-    if (!d->sync->isRunning()) {
+    if (!d->sync->isRunning() && !chaoxingBusy()) {
         return WebActionResult{false, 409, QStringLiteral("当前没有正在进行的同步"), {}};
     }
-    d->sync->cancel();
+    if (d->sync->isRunning()) {
+        d->sync->cancel();
+    }
+    if (chaoxingBusy()) {
+        d->chaoxingSync->cancel();
+    }
     appendLog(QStringLiteral("iPad 端取消了同步。"));
     updateActionStates();
     return WebActionResult{true, 200, {}, buildStatusJson()};
@@ -1222,6 +1269,19 @@ void MainWindow::buildUi()
             .arg(kStartupFullScanMinGapMinutes));
     scheduleLayout->addWidget(d->startupFullScan);
 
+    // v2.1：学习通（超星）采集开关（默认开启）。
+    // 与南大共用同一份定时周期配置：每次同步（按钮 / 定时 / 启动扫描）
+    // 结束南大侧之后串行采集学习通，不单独配周期。
+    d->chaoxingEnabled = new QCheckBox(
+        QStringLiteral("同步时一并采集学习通（超星）"), scheduleGroup);
+    d->chaoxingEnabled->setChecked(
+        makeAppSettings().value(QString::fromLatin1(kChaoxingEnabledKey), true).toBool());
+    d->chaoxingEnabled->setToolTip(
+        QStringLiteral("学习通没有 JSON 接口，采集依靠内置浏览器页面导航完成，"
+                       "比南大侧慢；共用上方同一个同步周期。\n"
+                       "登录方式为扫码：会话失效时会弹出学习通登录窗口。"));
+    scheduleLayout->addWidget(d->chaoxingEnabled);
+
     // 需求第十条：访问频率未与站点确认前必须如实提示，而不是默默高频采集
     auto *freqWarning = new QLabel(
         QStringLiteral("默认周期为 %1 分钟。经查证，站点文档中仅确认了"
@@ -1268,10 +1328,10 @@ void MainWindow::buildUi()
 
     auto *courseGroup = new QGroupBox(QStringLiteral("课程列表"), dataPage);
     auto *courseLayout = new QVBoxLayout(courseGroup);
-    d->courseTable = new QTableWidget(0, 4, courseGroup);
+    d->courseTable = new QTableWidget(0, 5, courseGroup);
     d->courseTable->setHorizontalHeaderLabels(
-        {QStringLiteral("课程"), QStringLiteral("课程代码"), QStringLiteral("教师"),
-         QStringLiteral("最后观察")});
+        {QStringLiteral("课程"), QStringLiteral("来源"), QStringLiteral("课程代码"),
+         QStringLiteral("教师"), QStringLiteral("最后观察")});
     d->courseTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     d->courseTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     d->courseTable->setAlternatingRowColors(true);
@@ -1284,8 +1344,9 @@ void MainWindow::buildUi()
         header->setStretchLastSection(false);
         header->setSectionResizeMode(0, QHeaderView::Stretch);
         header->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        header->setSectionResizeMode(2, QHeaderView::Stretch);
-        header->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        header->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        header->setSectionResizeMode(3, QHeaderView::Stretch);
+        header->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     }
     d->courseEmptyHint = new QLabel(
         QStringLiteral("暂无课程数据。点「开始全量采集」后，这里会列出你有权限访问的课程。"),
@@ -1314,7 +1375,7 @@ void MainWindow::buildUi()
     d->assignmentTable->setHorizontalHeaderLabels(
         {QStringLiteral("状态"), QStringLiteral("标题"), QStringLiteral("截止时间（北京时间）"),
          QStringLiteral("剩余"), QStringLiteral("发布时间"), QStringLiteral("得分"),
-         QStringLiteral("来源 ID")});
+         QStringLiteral("来源 ID"), QStringLiteral("来源")});
     d->assignmentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     d->assignmentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     d->assignmentTable->setAlternatingRowColors(true);
@@ -1641,13 +1702,20 @@ void MainWindow::wireSignals()
         updateActionStates();
     });
     connect(d->cancelButton, &QPushButton::clicked, this, [this]() {
-        d->sync->cancel();
+        // 南大与学习通是串行两段：取消时两段都取消（未开始的那段自然无操作）
+        if (d->sync->isRunning()) {
+            d->sync->cancel();
+        }
+        if (chaoxingBusy()) {
+            d->chaoxingSync->cancel();
+        }
         updateActionStates();
     });
 
     // ---- 同步进度与结果 ----
     connect(d->sync.get(), &SyncManager::runStarted, this,
             [this](SyncManager::Mode mode, qint64 runId, int totalCourses) {
+                d->lastSyncMode = mode;
                 d->progress->setValue(0);
                 d->progressLabel->setText(QStringLiteral("%1 开始：共 %2 门课程（运行 #%3）")
                                               .arg(syncModeDisplay(mode))
@@ -1747,6 +1815,13 @@ void MainWindow::wireSignals()
         d->sync->setConfig(config);
         appendLog(on ? QStringLiteral("已启用快速增量：先读待办判断变化，只深扫变化的课程。")
                      : QStringLiteral("已关闭快速增量：增量同步会完整扫描全部课程。"));
+    });
+
+    // ---- v2.1：学习通采集开关 ----
+    connect(d->chaoxingEnabled, &QCheckBox::toggled, this, [this](bool on) {
+        makeAppSettings().setValue(QString::fromLatin1(kChaoxingEnabledKey), on);
+        appendLog(on ? QStringLiteral("已开启「同步时一并采集学习通」。")
+                     : QStringLiteral("已关闭「同步时一并采集学习通」。"));
     });
 
     connect(d->scheduleMinutes, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
@@ -1858,13 +1933,15 @@ void MainWindow::refreshCourseList()
         auto *nameItem = new QTableWidgetItem(c.courseName);
         nameItem->setData(Qt::UserRole, c.courseId);
         d->courseTable->setItem(row, 0, nameItem);
-        d->courseTable->setItem(row, 1, new QTableWidgetItem(c.courseCode));
-        d->courseTable->setItem(row, 2, new QTableWidgetItem(c.instructors.join(QStringLiteral("、"))));
+        d->courseTable->setItem(row, 1, new QTableWidgetItem(sourceDisplay(c.source)));
+        d->courseTable->setItem(row, 2, new QTableWidgetItem(c.courseCode));
+        d->courseTable->setItem(row, 3,
+                                new QTableWidgetItem(c.instructors.join(QStringLiteral("、"))));
         auto *seenItem = new QTableWidgetItem(c.lastSeenAt.isValid()
                                                   ? timeutil::toBeijingDisplay(c.lastSeenAt)
                                                   : QString());
         seenItem->setFont(monospaceFont());   // 时间列用等宽，便于纵向比对
-        d->courseTable->setItem(row, 3, seenItem);
+        d->courseTable->setItem(row, 4, seenItem);
 
         const int count = d->repository->countAssignments(c.courseId);
         d->courseSelector->addItem(
@@ -1889,6 +1966,15 @@ void MainWindow::refreshCourseList()
 void MainWindow::refreshAssignmentTable(const QString &courseId)
 {
     const QList<Assignment> assignments = d->repository->listAssignments(courseId);
+
+    // 作业本身不存来源（来源属于课程）：查一次课程拿来源标签
+    QString courseSource;
+    for (const Course &candidate : d->repository->listCourses()) {
+        if (candidate.courseId == courseId) {
+            courseSource = candidate.source;
+            break;
+        }
+    }
 
     d->assignmentTable->setRowCount(assignments.size());
     int overdue = 0;
@@ -1939,6 +2025,7 @@ void MainWindow::refreshAssignmentTable(const QString &courseId)
         auto *sourceItem = new QTableWidgetItem(a.sourceId);
         sourceItem->setFont(monospaceFont());
         d->assignmentTable->setItem(row, ColSourceId, sourceItem);
+        d->assignmentTable->setItem(row, ColSource, new QTableWidgetItem(sourceDisplay(courseSource)));
 
         // 逾期高亮
         if (a.dueAt.hasValue() && a.dueAt.require() < now
@@ -2001,16 +2088,18 @@ void MainWindow::appendLog(const QString &line, bool isError)
 
 void MainWindow::updateActionStates()
 {
-    const bool running = d->sync->isRunning();
+    const bool njuRunning = d->sync->isRunning();
     const bool paused = d->sync->isPaused();
+    const bool busy = njuRunning || chaoxingBusy();
 
-    d->fullScanButton->setEnabled(!running);
-    d->incrementalButton->setEnabled(!running);
-    d->pauseButton->setEnabled(running && !paused);
-    d->resumeButton->setEnabled(running && paused);
-    d->cancelButton->setEnabled(running);
+    d->fullScanButton->setEnabled(!busy);
+    d->incrementalButton->setEnabled(!busy);
+    // 暂停/继续只作用于南大侧（学习通阶段是短任务，只支持整体取消）
+    d->pauseButton->setEnabled(njuRunning && !paused);
+    d->resumeButton->setEnabled(njuRunning && paused);
+    d->cancelButton->setEnabled(busy);
     d->scheduleEnabled->setEnabled(true);
-    d->scheduleMinutes->setEnabled(!running);
+    d->scheduleMinutes->setEnabled(!busy);
 }
 
 int MainWindow::configuredIntervalMinutes() const
@@ -2041,6 +2130,158 @@ void MainWindow::hideLoginWindow()
     }
     d->loginWindow->hide();
     appendLog(QStringLiteral("登录成功，已自动隐藏浏览器窗口。"));
+}
+
+// ---------------------------------------------------------------------------
+// 学习通（超星）
+// ---------------------------------------------------------------------------
+
+bool MainWindow::chaoxingBusy() const
+{
+    return d->chaoxingSync != nullptr && d->chaoxingSync->isRunning();
+}
+
+/**
+ * 创建学习通适配器、同步运行器与登录窗口，并接线。
+ *
+ * 放在浏览器 Profile 初始化之后调用：适配器需要共享同一个持久化
+ * Profile（Cookie / 扫码登录态与主页面互通），而 Profile 在 initialize()
+ * 之前不存在。
+ */
+void MainWindow::setupChaoxing()
+{
+    QWebEngineProfile *profile = d->bridge->profile();
+    if (profile == nullptr) {
+        appendLog(QStringLiteral("学习通采集不可用：浏览器 Profile 未初始化。"), true);
+        return;
+    }
+
+    // 登录窗口：默认隐藏，只有需要扫码时才弹出（与南大登录窗口同款交互）。
+    // 先建视图、再建页面：页面必须以视图为父构造（见 ChaoxingAdapter 的说明）。
+    d->chaoxingLoginWindow = new LoginWindow(this);
+    d->chaoxingLoginWindow->setWindowTitle(
+        QStringLiteral("登录 · 学习通（扫码完成后窗口自动隐藏）"));
+    auto *view = new QWebEngineView(d->chaoxingLoginWindow);
+    {
+        auto *layout = new QVBoxLayout(d->chaoxingLoginWindow);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->addWidget(view);
+    }
+
+    d->chaoxing = std::make_unique<ChaoxingAdapter>(profile, view);
+    d->chaoxingSync =
+        std::make_unique<ChaoxingSyncRunner>(d->repository.get(), d->chaoxing.get());
+
+    connect(d->chaoxing.get(), &ChaoxingAdapter::loginRequired, this,
+            [this](const QString &reason) {
+                appendLog(QStringLiteral("学习通需要登录：%1").arg(reason), true);
+                showChaoxingLoginWindow(reason);
+            });
+    connect(d->chaoxing.get(), &ChaoxingAdapter::stageMessage, this,
+            [this](const QString &message) { statusBar()->showMessage(message, 8000); });
+
+    connect(d->chaoxingSync.get(), &ChaoxingSyncRunner::runStarted, this,
+            [this](qint64 runId, const QString &mode) {
+                Q_UNUSED(mode)
+                d->progress->setValue(0);
+                d->progressLabel->setText(
+                    QStringLiteral("学习通采集开始：正在获取课程列表（运行 #%1）").arg(runId));
+                updateActionStates();
+            });
+    connect(d->chaoxingSync.get(), &ChaoxingSyncRunner::progressChanged, this,
+            [this](int percent) {
+                if (chaoxingBusy()) {
+                    d->progress->setValue(percent);
+                }
+            });
+    connect(d->chaoxingSync.get(), &ChaoxingSyncRunner::statusMessage, this,
+            [this](const QString &message) {
+                d->progressLabel->setText(message);
+                statusBar()->showMessage(message, 10000);
+            });
+    connect(d->chaoxingSync.get(), &ChaoxingSyncRunner::courseFinished, this,
+            [this](const QString &courseName, bool ok, const QString &detail) {
+                if (!ok) {
+                    appendLog(QStringLiteral("学习通课程「%1」：%2").arg(courseName, detail),
+                              true);
+                }
+            });
+    connect(d->chaoxingSync.get(), &ChaoxingSyncRunner::loginRequired, this,
+            [this](const QString &reason) {
+                appendLog(QStringLiteral("学习通登录状态失效：%1").arg(reason), true);
+            });
+    connect(d->chaoxingSync.get(), &ChaoxingSyncRunner::runFinished, this,
+            [this](ChaoxingSyncRunner::Outcome outcome, const QString &message, int succeeded,
+                   int failed, int skipped) {
+                Q_UNUSED(succeeded)
+                Q_UNUSED(failed)
+                Q_UNUSED(skipped)
+                const bool isError = outcome == ChaoxingSyncRunner::Outcome::Failed
+                                     || outcome == ChaoxingSyncRunner::Outcome::WaitingForLogin;
+                appendLog(message, isError);
+                loadPersistedData();
+                if (outcome == ChaoxingSyncRunner::Outcome::Success
+                    || outcome == ChaoxingSyncRunner::Outcome::Partial) {
+                    // 数据能取到说明学习通会话有效 → 登录窗口可以收起来了
+                    hideChaoxingLoginWindow();
+                }
+                updateActionStates();
+            });
+
+    // 串行触发：每次南大同步结束（按钮 / 定时 / 启动扫描 / iPad）后采集学习通。
+    // 取消的那一轮不跟随，避免"取消之后又自己跑起来"。
+    connect(d->sync.get(), &SyncManager::runFinished, this,
+            [this](const SyncManager::RunSummary &summary) {
+                if (summary.outcome == SyncManager::Outcome::Cancelled) {
+                    return;
+                }
+                maybeStartChaoxingSync();
+            });
+}
+
+void MainWindow::maybeStartChaoxingSync()
+{
+    if (d->chaoxingSync == nullptr) {
+        return;
+    }
+    if (!d->chaoxingEnabled->isChecked()) {
+        return;
+    }
+    if (d->chaoxingSync->isRunning()) {
+        return;
+    }
+
+    const QString mode = d->lastSyncMode == SyncManager::Mode::Full
+                             ? QStringLiteral("full")
+                             : QStringLiteral("incremental");
+    QString error;
+    if (!d->chaoxingSync->start(mode, &error)) {
+        appendLog(QStringLiteral("学习通采集未启动：%1").arg(error), true);
+    }
+}
+
+void MainWindow::showChaoxingLoginWindow(const QString &reason)
+{
+    if (d->chaoxingLoginWindow == nullptr) {
+        return;
+    }
+    const bool alreadyVisible = d->chaoxingLoginWindow->isVisible();
+    if (!alreadyVisible && !reason.isEmpty()) {
+        appendLog(reason);
+        statusBar()->showMessage(reason, 20000);
+    }
+    d->chaoxingLoginWindow->show();
+    d->chaoxingLoginWindow->raise();
+    d->chaoxingLoginWindow->activateWindow();
+}
+
+void MainWindow::hideChaoxingLoginWindow()
+{
+    if (d->chaoxingLoginWindow == nullptr || !d->chaoxingLoginWindow->isVisible()) {
+        return;
+    }
+    d->chaoxingLoginWindow->hide();
+    appendLog(QStringLiteral("学习通登录有效，已自动隐藏登录窗口。"));
 }
 
 void MainWindow::beginSync(SyncManager::Mode mode)

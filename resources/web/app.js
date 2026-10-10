@@ -184,7 +184,9 @@ function renderStatus(data) {
   const percent = Number.isFinite(sync.percent) ? sync.percent : 0;
   el('progress-fill').style.width = `${percent}%`;
   el('progress-percent').textContent = `${percent}%`;
-  el('sync-status').textContent = sync.statusMessage || (sync.running ? '正在采集…' : '空闲');
+  el('sync-status').textContent =
+    sync.statusMessage ||
+    (sync.running || sync.chaoxingRunning ? '正在采集…' : '空闲');
 
   const last = data.lastRun;
   el('last-run').textContent = last
@@ -221,6 +223,7 @@ function renderSettings(data) {
   setCheckedIf('set-quick', settings.quickIncremental);
   setCheckedIf('set-startup-scan', settings.startupFullScan);
   setCheckedIf('set-enrich', settings.enrichDescriptions);
+  setCheckedIf('set-chaoxing', settings.chaoxingEnabled);
 
   const interval = el('set-interval');
   if (document.activeElement !== interval && typeof settings.scheduleIntervalMinutes === 'number') {
@@ -303,6 +306,8 @@ function renderPending() {
               <span class="item-meta">${escapeHtml(row.courseName || '')}</span>
             </span>
             <span class="item-side">
+              ${row.sourceLabel
+                ? `<span class="chip chip-source">${escapeHtml(row.sourceLabel)}</span>` : ''}
               ${overdue ? '<span class="chip chip-bad">已逾期</span>' : ''}
               <span class="chev"></span>
             </span>
@@ -316,6 +321,7 @@ function renderPending() {
               ${description}
               <dl class="meta-grid">
                 <dt>课程</dt><dd>${escapeHtml(row.courseName || '')}</dd>
+                <dt>站点</dt><dd>${escapeHtml(row.sourceLabel || '未知')}</dd>
                 <dt>状态</dt><dd>${escapeHtml(row.status)}</dd>
                 <dt>发布</dt><dd class="mono">${escapeHtml(row.publishedAt || '未知')}</dd>
                 <dt>来源</dt><dd class="mono">${escapeHtml(row.sourceId)}</dd>
@@ -381,7 +387,11 @@ function renderSubmitted() {
               <span class="item-title">${escapeHtml(group.name)}</span>
               <span class="item-meta">${group.rows.length} 条已提交 · 按发布时间由新到旧</span>
             </span>
-            <span class="item-side"><span class="chev"></span></span>
+            <span class="item-side">
+              ${group.rows[0].sourceLabel
+                ? `<span class="chip chip-source">${escapeHtml(group.rows[0].sourceLabel)}</span>` : ''}
+              <span class="chev"></span>
+            </span>
           </button>
         </div>
         <div class="collapse">
@@ -663,7 +673,8 @@ el('btn-incremental').addEventListener('click', async () => {
 
 el('btn-full').addEventListener('click', async () => {
   await writeAction('/api/sync', { mode: 'full' }, '已开始全量采集',
-                    '全量采集会把所有课程完整扫一遍（13 门课约 10 秒、十几个请求），确定开始吗？');
+                    '全量采集会把所有课程完整扫一遍（南大十几门课约 10 秒；' +
+                    '若开启了学习通，还会逐门取作业列表，多花一两分钟），确定开始吗？');
   tick(true);
 });
 
@@ -690,6 +701,7 @@ for (const [id, key] of [
   ['set-quick', 'quickIncremental'],
   ['set-startup-scan', 'startupFullScan'],
   ['set-enrich', 'enrichDescriptions'],
+  ['set-chaoxing', 'chaoxingEnabled'],
 ]) {
   el(id).addEventListener('change', async (event) => {
     const value = event.target.checked;

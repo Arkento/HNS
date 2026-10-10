@@ -23,6 +23,13 @@ add_executable(njulms_app
 
     ../browser/WebEnginePageBridge.cpp
     ../browser/WebEnginePageBridge.h
+
+    # 学习通（超星）采集：页面驱动型适配器 + 串行同步运行器
+    # （需要 QWebEnginePage，因此与核心库分开，只进 GUI 目标）
+    ../adapters/ChaoxingAdapter.cpp
+    ../adapters/ChaoxingAdapter.h
+    ../sync/ChaoxingSyncRunner.cpp
+    ../sync/ChaoxingSyncRunner.h
 )
 
 target_include_directories(njulms_app PRIVATE

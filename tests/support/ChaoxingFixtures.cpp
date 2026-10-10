@@ -84,6 +84,17 @@ QString workListTemplateChanged()
 )HTML");
 }
 
+QString workListEmptyState()
+{
+    return QStringLiteral(R"HTML(
+<div class="work-content">
+  <div class="null-data" style="font-size: 14px;">暂无作业</div>
+  <div style="width:100%;height:110px;"></div>
+  <div class="pagePosition"><div class="pageDiv" id="page"></div></div>
+</div>
+)HTML");
+}
+
 } // namespace chaoxing_fixtures
 } // namespace test
 } // namespace njulms

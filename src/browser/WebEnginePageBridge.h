@@ -53,6 +53,10 @@ public:
     /// 承载网页的视图。调用方（MainWindow）负责把它放进布局并显示。
     QWebEngineView *view() const;
 
+    /// 共享的持久化 Profile。学习通适配器用它创建自己的页面（同一份 Cookie）。
+    /// 未成功 initialize() 时返回 nullptr。
+    QWebEngineProfile *profile() const;
+
     /// 加载站点首页（登录入口）
     void loadHome();
 
