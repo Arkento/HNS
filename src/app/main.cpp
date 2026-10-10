@@ -11,6 +11,13 @@
 
 #include <cstdlib>
 
+#ifdef Q_OS_WIN
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
+
 using namespace njulms;
 
 /**
@@ -31,6 +38,14 @@ int main(int argc, char *argv[])
     quietChromiumInfoLogs();
 
     QApplication app(argc, argv);
+
+#ifdef Q_OS_WIN
+    // 本程序是"后台采集器"：启动扫描、定时采集这类批量工作不该跟用户的前台
+    // （编辑器、输入法、浏览器）抢 CPU。降到"低于正常"优先级后，Windows 会把
+    // 我们的 CPU 时间片让给前台，用户手上该流畅的还是流畅。
+    // 子进程（QtWebEngine 的 renderer/gpu）创建时继承该优先级，所以放在这里设置。
+    ::SetPriorityClass(::GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+#endif
 
     QCoreApplication::setOrganizationName(QStringLiteral("NjuLmsCrawler"));
     QCoreApplication::setApplicationName(QStringLiteral("NjuLmsCrawler"));
