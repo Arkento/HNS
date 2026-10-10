@@ -162,6 +162,76 @@ private slots:
         // 否则上层会把它当成"读不出内容"，永远无法软删已经消失的旧作业。
         QVERIFY2(issues.isEmpty(), qPrintable(issues.value(0).reason));
     }
+
+    // ---- 考试列表（考试接入）--------------------------------------------------
+
+    void examList_parsesItemsAndBuildsDetailUrls()
+    {
+        const QString listUrl = QStringLiteral(
+            "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list?courseid=111111111"
+            "&clazzid=222222222&cpi=333333333&ut=s&t=1791&stuenc=aaa");
+        ParseIssues issues;
+        const QList<Assignment> exams = ChaoxingParser::parseExamList(
+            chaoxing_fixtures::examListTwoItems(), QStringLiteral("111111111-222222222"),
+            listUrl, observedAt(), &issues);
+
+        QCOMPARE(exams.size(), 2);
+        QVERIFY2(issues.isEmpty(), qPrintable(issues.value(0).reason));
+
+        // ① 已完成：状态 Submitted；详情 = "查看答卷"页（路径取自该页 viewExamAnswer 源码）
+        const Assignment &done = exams.at(0);
+        QCOMPARE(done.kind, QStringLiteral("exam"));
+        QCOMPARE(done.sourceId, QStringLiteral("cx-exam-900001"));
+        QCOMPARE(done.title.require(), QStringLiteral("Level A Vocab. Quiz 1"));
+        QCOMPARE(done.status.require(), AssignmentStatus::Submitted);
+        QCOMPARE(done.submitted.require(), true);
+        const QString lookUrl = done.detailUrl.require();
+        QVERIFY(lookUrl.contains(QStringLiteral("/exam-ans/exam/test/look?")));
+        QVERIFY(lookUrl.contains(QStringLiteral("examId=900001")));
+        QVERIFY(lookUrl.contains(QStringLiteral("examAnswerId=800001")));
+        QVERIFY(lookUrl.contains(QStringLiteral("courseId=111111111")));
+        QVERIFY(lookUrl.contains(QStringLiteral("classId=222222222")));
+        QVERIFY(lookUrl.contains(QStringLiteral("cpi=333333333")));
+
+        // ② 未完成：Pending；剩余 3 天 2 小时折算成绝对时间；
+        //    非 viewExamAnswer → 详情退回考试列表页本身（不猜进入考试的加密地址）
+        const Assignment &open = exams.at(1);
+        QCOMPARE(open.sourceId, QStringLiteral("cx-exam-900002"));
+        QCOMPARE(open.status.require(), AssignmentStatus::Pending);
+        QCOMPARE(open.submitted.require(), false);
+        QCOMPARE(open.dueAt.require(),
+                 QDateTime(QDate(2026, 10, 13), QTime(14, 0), QTimeZone::UTC));
+        QCOMPARE(open.detailUrl.require(), listUrl);
+    }
+
+    void examList_explicitEmptyStateIsAuthoritative()
+    {
+        ParseIssues issues;
+        const QList<Assignment> exams = ChaoxingParser::parseExamList(
+            chaoxing_fixtures::examListEmptyState(), QStringLiteral("111111111-222222222"),
+            QStringLiteral(
+                "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list?courseid=111111111"),
+            observedAt(), &issues);
+
+        QVERIFY(exams.isEmpty());
+        // 「暂无考试」是权威空列表：不记 Missing，上层才能安全软删已消失的旧考试
+        QVERIFY2(issues.isEmpty(), qPrintable(issues.value(0).reason));
+    }
+
+    void examList_templateChangedYieldsEmptyWithIssue()
+    {
+        ParseIssues issues;
+        const QList<Assignment> exams = ChaoxingParser::parseExamList(
+            QStringLiteral("<html><body>页面已改版</body></html>"),
+            QStringLiteral("111111111-222222222"),
+            QStringLiteral(
+                "https://mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list?courseid=111111111"),
+            observedAt(), &issues);
+
+        QVERIFY(exams.isEmpty());
+        QCOMPARE(issues.size(), 1);
+        QCOMPARE(issues.first().state, FieldState::Missing);
+    }
 };
 
 QTEST_MAIN(ChaoxingParserTests)

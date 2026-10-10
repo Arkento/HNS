@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTest>
+#include <QTimeZone>
 
 using namespace njulms;
 using namespace njulms::test;
@@ -382,6 +383,53 @@ private slots:
         // 没有稳定标识就无法安全去重，宁可跳过也不要生成重复记录
         QVERIFY(list.isEmpty());
         QVERIFY(!issues.isEmpty());
+    }
+
+    // ---- 考试（考试接入，v4）--------------------------------------------------
+
+    void examList_parsesFieldsAndDerivesRoute()
+    {
+        const QJsonObject root =
+            QJsonDocument::fromJson(fixtures::examListTwoExams().toUtf8()).object();
+        const AssignmentParser::ExamListOutcome out = AssignmentParser::parseExamList(
+            root, QStringLiteral("90001"), fixtures::observedBeforeDeadlines());
+
+        QVERIFY(out.ok);
+        QCOMPARE(out.exams.size(), 2);
+
+        const Assignment &submitted = out.exams.at(0);
+        QCOMPARE(submitted.kind, QStringLiteral("exam"));
+        QCOMPARE(submitted.sourceId, QStringLiteral("exam-81001"));
+        QCOMPARE(submitted.activityId, QStringLiteral("81001"));
+        QCOMPARE(submitted.title.require(), QStringLiteral("期中测试"));
+        QCOMPARE(submitted.submitted.require(), true);
+        QCOMPARE(submitted.status.require(), AssignmentStatus::Submitted);
+        // final_score 优先于 score
+        QCOMPARE(submitted.score.require(), 88.5);
+        QCOMPARE(submitted.dueAt.require(),
+                 QDateTime(QDate(2026, 10, 1), QTime(3, 0), QTimeZone::UTC));
+        QCOMPARE(submitted.description.require(), QStringLiteral("闭卷，允许带一张 A4 纸。"));
+        // 详情链接：站点自己的考试路由 /course/{id}/learning-activity#/exam/{examId}
+        QVERIFY(submitted.detailUrl.require().contains(
+            QStringLiteral("/course/90001/learning-activity#/exam/81001")));
+
+        const Assignment &pending = out.exams.at(1);
+        QCOMPARE(pending.sourceId, QStringLiteral("exam-81002"));
+        QCOMPARE(pending.submitted.require(), false);
+        QCOMPARE(pending.status.require(), AssignmentStatus::Pending);   // 未开始
+        // final_score/score 均为 null：确认"暂无成绩"（Absent），不是解析失败
+        QCOMPARE(pending.score.state(), FieldState::Absent);
+    }
+
+    void examList_missingEnvelopeIsNotAnEmptyList()
+    {
+        // 信封不符（未登录形态/结构改版）必须 ok=false：
+        // 调用方不得把它当成"这门课没有考试"，否则会把历史考试软删掉。
+        const AssignmentParser::ExamListOutcome out = AssignmentParser::parseExamList(
+            QJsonObject{}, QStringLiteral("90001"), fixtures::observedBeforeDeadlines());
+        QVERIFY(!out.ok);
+        QVERIFY(out.exams.isEmpty());
+        QVERIFY(!out.issues.isEmpty());
     }
 };
 

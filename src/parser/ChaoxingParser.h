@@ -53,6 +53,29 @@ public:
     static QList<Assignment> parseWorkList(const QString &html, const QString &courseId,
                                            const QDateTime &observedAt,
                                            ParseIssues *issues = nullptr);
+
+    /**
+     * 考试列表页（`mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list?…`）→ 考试。
+     *
+     * 实测模板（2026-10-10，两门课程各含一条已完成考试）：
+     * ```
+     * <li>
+     *   <div … role="option" onclick="viewExamAnswer('10953874','171363707')">
+     *     <p class="overHidden2 fl">Level A Vocab. Quiz 1</p>
+     *     <p class="status fl">已完成</p>
+     *   </div>
+     * </li>
+     * ```
+     * 详情链接：
+     *   - 已完成（viewExamAnswer）→ 拼接"查看答卷"页（路径来自该页 viewExamAnswer 函数源码）；
+     *   - 其它状态 → 退回考试列表页本身（进入考试的地址由加密参数生成，不猜）。
+     *
+     * @param examListUrl 考试列表页完整 URL（含 courseid/clazzid/cpi 参数，用于构造链接）
+     */
+    static QList<Assignment> parseExamList(const QString &html, const QString &courseId,
+                                           const QString &examListUrl,
+                                           const QDateTime &observedAt,
+                                           ParseIssues *issues = nullptr);
 };
 
 } // namespace njulms

@@ -305,6 +305,8 @@ function renderPending() {
               <span class="item-meta">${escapeHtml(row.courseName || '')}</span>
             </span>
             <span class="item-side">
+              ${row.kind && row.kind !== 'homework'
+                ? `<span class="chip chip-exam">${escapeHtml(row.kindLabel || row.kind)}</span>` : ''}
               ${row.sourceLabel
                 ? `<span class="chip chip-source">${escapeHtml(row.sourceLabel)}</span>` : ''}
               ${overdue ? '<span class="chip chip-bad">已逾期</span>' : ''}
@@ -321,6 +323,7 @@ function renderPending() {
               <dl class="meta-grid">
                 <dt>课程</dt><dd>${escapeHtml(row.courseName || '')}</dd>
                 <dt>站点</dt><dd>${escapeHtml(row.sourceLabel || '未知')}</dd>
+                <dt>类型</dt><dd>${escapeHtml(row.kindLabel || '作业')}</dd>
                 <dt>状态</dt><dd>${escapeHtml(row.status)}</dd>
                 <dt>发布</dt><dd class="mono">${escapeHtml(row.publishedAt || '未知')}</dd>
                 <dt>来源</dt><dd class="mono">${escapeHtml(row.sourceId)}</dd>
@@ -366,6 +369,8 @@ function renderSubmitted() {
         <span class="sub-main">
           <span class="sub-title">${escapeHtml(row.title)}</span>
           <span class="sub-meta">
+            ${row.kind && row.kind !== 'homework'
+              ? `<span>${escapeHtml(row.kindLabel || row.kind)}</span>` : ''}
             <span>截止 ${escapeHtml(row.dueAt || '未知')}</span>
             <span>发布 ${escapeHtml(row.publishedAt || '未知')}</span>
             <span>得分 ${escapeHtml(row.score)}</span>

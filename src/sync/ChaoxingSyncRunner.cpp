@@ -5,6 +5,8 @@
 
 #include <QLoggingCategory>
 
+#include <algorithm>
+
 namespace njulms {
 namespace {
 
@@ -109,57 +111,111 @@ public:
             return;
         }
         const Course course = courses.at(index);
-        emit q->statusMessage(QStringLiteral("学习通：正在采集「%1」（%2/%3）…")
+        emit q->statusMessage(QStringLiteral("学习通：正在采集「%1」（%2/%3）：作业…")
                                   .arg(course.courseName)
                                   .arg(index + 1)
                                   .arg(courses.size()));
-        adapter->fetchWorkList(course, [this, course](const ChaoxingAdapter::WorkListResult &r) {
-            onWorkList(course, r);
+        adapter->fetchWorkList(course, [this, course](const ChaoxingAdapter::ListResult &work) {
+            if (!running) {
+                return;
+            }
+            if (!work.error.ok()) {
+                if (work.error.needsLogin()) {
+                    emit q->loginRequired(work.error.message);
+                    finish(Outcome::WaitingForLogin, work.error.message);
+                    return;
+                }
+                ++failed;
+                qCInfo(lcChaoxingSync) << "course failed;" << "course:" << course.courseName
+                                       << "reason:" << work.error.message;
+                emit q->courseFinished(course.courseName, false, work.error.message);
+                advance();
+                return;
+            }
+
+            // 作业成功（或作业入口缺失但这个结果本身有效）→ 再取考试列表
+            emit q->statusMessage(QStringLiteral("学习通：正在采集「%1」（%2/%3）：考试…")
+                                      .arg(course.courseName)
+                                      .arg(index + 1)
+                                      .arg(courses.size()));
+            adapter->fetchExamList(
+                course, [this, course, work](const ChaoxingAdapter::ListResult &exam) {
+                    onLists(course, work, exam);
+                });
         });
     }
 
-    void onWorkList(const Course &course, const ChaoxingAdapter::WorkListResult &result)
+    /// 判断一份列表是否是"读不出内容"（模板改版/未登录形态；权威空列表不算）
+    static bool listUnreadable(const ChaoxingAdapter::ListResult &result, const char *field)
+    {
+        for (const ParseIssue &issue : result.issues) {
+            if (issue.field == QLatin1String(field) && issue.state == FieldState::Missing) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 作业 + 考试都拿到之后的收尾：
+     *   - 任一侧会话失效 → 等待登录；
+     *   - 两份都读不出 → 跳过（保留旧数据）；
+     *   - 否则合并写入；只有两份都完整时才允许软删除。
+     */
+    void onLists(const Course &course, const ChaoxingAdapter::ListResult &work,
+                 const ChaoxingAdapter::ListResult &exam)
     {
         if (!running) {
             return;
         }
-        if (!result.error.ok()) {
-            if (result.error.needsLogin()) {
-                emit q->loginRequired(result.error.message);
-                finish(Outcome::WaitingForLogin, result.error.message);
-                return;
-            }
-            ++failed;
-            qCInfo(lcChaoxingSync) << "course failed;" << "course:" << course.courseName
-                                   << "reason:" << result.error.message;
-            emit q->courseFinished(course.courseName, false, result.error.message);
-            advance();
+        if (exam.error.needsLogin()) {
+            emit q->loginRequired(exam.error.message);
+            finish(Outcome::WaitingForLogin, exam.error.message);
             return;
         }
 
-        recordIssues(course.courseId, result.issues);
+        recordIssues(course.courseId, work.issues);
+        recordIssues(course.courseId, exam.issues);
 
-        // 页面读不出内容（模板改版、未登录形态等）→ 不写库、保留旧数据、计入"跳过"。
-        // 明确写着"暂无作业"的空列表则继续走下面的快照写入（这会软删本课程的历史条目，
-        // 是正确语义：列表是权威的，作业确实没有了）。
-        bool worklistUnreadable = false;
-        for (const ParseIssue &issue : result.issues) {
-            if (issue.field == QLatin1String("chaoxing.worklist")
-                && issue.state == FieldState::Missing) {
-                worklistUnreadable = true;
-            }
+        // 硬错误（传输/超时等）落一条解析异常，便于排查
+        if (!exam.error.ok()) {
+            recordIssues(course.courseId,
+                         ParseIssues{ParseIssue(
+                             QStringLiteral("chaoxing.examlist"),
+                             QStringLiteral("exam list error: %1").arg(exam.error.message),
+                             FieldState::Invalid)});
         }
-        if (worklistUnreadable) {
+
+        const bool workReadable = !listUnreadable(work, "chaoxing.worklist");
+        const bool examReadable = exam.error.ok() && !listUnreadable(exam, "chaoxing.examlist");
+
+        if (!workReadable && !examReadable) {
+            // 两份列表都读不出内容 → 跳过该课程（保留旧数据）
             ++skipped;
             emit q->courseFinished(course.courseName, false,
-                                   QStringLiteral("跳过：未解析到作业列表（保留旧数据）"));
+                                   QStringLiteral("跳过：作业与考试列表均未解析到（保留旧数据）"));
             advance();
             return;
         }
 
+        // 合并：考试条目直接追加（sourceId 前缀 cx-exam-，与 cx-work- 天然不冲突，仍去重防御）
+        QList<Assignment> merged = work.assignments;
+        for (const Assignment &examItem : exam.assignments) {
+            const auto duplicate = std::find_if(
+                merged.cbegin(), merged.cend(), [&examItem](const Assignment &existing) {
+                    return existing.sourceId == examItem.sourceId;
+                });
+            if (duplicate == merged.cend()) {
+                merged.append(examItem);
+            }
+        }
+
+        // 只有两份都读到且都完整时，才允许软删除对账
+        const bool complete = workReadable && examReadable && work.snapshotComplete
+                              && exam.snapshotComplete;
+
         const BatchApplyResult applied = repo->applyAssignmentSnapshot(
-            course.courseId, result.assignments, runId, 1, QString(), QString(),
-            result.snapshotComplete, mode);
+            course.courseId, merged, runId, 1, QString(), QString(), complete, mode);
         if (applied.ok) {
             ++succeeded;
             emit q->courseFinished(course.courseName, true, QString());

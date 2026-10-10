@@ -39,4 +39,15 @@ std::optional<AssignmentStatus> assignmentStatusFromKey(const QString &key)
     return std::nullopt;
 }
 
+QString assignmentKindDisplay(const QString &kind)
+{
+    if (kind == QLatin1String("homework")) {
+        return QStringLiteral("作业");
+    }
+    if (kind == QLatin1String("exam")) {
+        return QStringLiteral("考试");
+    }
+    return kind;
+}
+
 } // namespace njulms

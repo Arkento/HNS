@@ -90,13 +90,49 @@ public:
     static QList<Assignment> parseAssignments(const QString &courseId,
                                               const QJsonArray &items,
                                               const QDateTime &observedAt,
-                                              ParseIssues *issues = nullptr);
+                                              ParseIssues *issues = nullptr,
+                                              const QString &kind = QStringLiteral("homework"));
 
     /// 解析单条作业
     static Assignment parseAssignment(const QString &courseId,
                                      const QJsonObject &obj,
                                      const QDateTime &observedAt,
-                                     ParseIssues *issues = nullptr);
+                                     ParseIssues *issues = nullptr,
+                                     const QString &kind = QStringLiteral("homework"));
+
+    // ---- 考试 ----------------------------------------------------------------
+
+    /**
+     * 考试列表解析结果。
+     *
+     * `ok == false` 表示响应信封里没有 exams 数组（结构不符或未登录形态），
+     * 调用方必须把它当成"这次没拿到考试列表"，而不是"这门课没有考试"。
+     */
+    struct ExamListOutcome
+    {
+        bool ok = false;
+        QList<Assignment> exams;
+        ParseIssues issues;
+    };
+
+    /**
+     * 解析 GET /api/courses/{id}/exam-list 的响应（考试接入）。
+     *
+     * 接口与字段来源（2026-10-10 实测，证据为该站点自己的前端 bundle
+     * static/12308.f90daf57.js 对 exams[] 的读取）：
+     *   - 信封：{"exams":[…], "total":n, "page":…, "pages":…, "page_size":…}
+     *   - 条目：id / title / start_time / end_time / is_closed / is_started /
+     *           submission_count / makeup_exam_submission_count / score / final_score /
+     *           make_up_record / data.description
+     * 本账号当前（2026-10-10）所有课程 exams 均为空，因此条目字段属
+     * 「前端代码实测 + 防御式读取」：解析不到就保持 Missing，绝不猜测。
+     */
+    static ExamListOutcome parseExamList(const QJsonObject &root, const QString &courseId,
+                                         const QDateTime &observedAt);
+
+    /// 解析单条考试
+    static Assignment parseExam(const QString &courseId, const QJsonObject &obj,
+                                const QDateTime &observedAt, ParseIssues *issues = nullptr);
 
     // ---- 内容摘要 -------------------------------------------------------------
 

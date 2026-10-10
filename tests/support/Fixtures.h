@@ -472,6 +472,59 @@ inline QString homeworkActivitiesBadTime(){
 })JSON");
 }
 
+/**
+ * 考试接入（v4）样本：GET /api/courses/{id}/exam-list 的响应。
+ *
+ * 结构与字段的来源：站点自己的考试列表页 bundle（static/12308.f90daf57.js）
+ * 对 exams[] 的读取（id/title/start_time/end_time/is_closed/is_started/
+ * submission_count/makeup_exam_submission_count/score/final_score/data）。
+ * 本账号当前 exams 为空，故样本值匿名化为测试值，仅保证结构一致。
+ */
+
+/// 空考试列表（大多数课程的现状）
+inline QString examListEmpty()
+{
+    return QStringLiteral(
+        R"({"exams":[],"total":0,"page":1,"pages":1,"page_size":50})");
+}
+
+/// 两场考试：一场已交并公布成绩，一场未开始
+inline QString examListTwoExams()
+{
+    return QStringLiteral(R"JSON({
+  "exams": [
+    {
+      "id": 81001,
+      "title": "期中测试",
+      "type": "exam",
+      "start_time": "2026-10-01T02:00:00Z",
+      "end_time": "2026-10-01T03:00:00Z",
+      "is_closed": true,
+      "is_started": true,
+      "submission_count": 1,
+      "makeup_exam_submission_count": 0,
+      "score": "80",
+      "final_score": "88.5",
+      "data": { "description": "闭卷，允许带一张 A4 纸。" }
+    },
+    {
+      "id": 81002,
+      "title": "期末测试",
+      "type": "exam",
+      "start_time": "2026-12-20T06:00:00Z",
+      "end_time": "2026-12-20T08:00:00Z",
+      "is_closed": false,
+      "is_started": false,
+      "submission_count": 0,
+      "makeup_exam_submission_count": 0,
+      "score": null,
+      "final_score": null
+    }
+  ],
+  "total": 2, "page": 1, "pages": 1, "page_size": 50
+})JSON");
+}
+
 } // namespace fixtures
 } // namespace test
 } // namespace njulms

@@ -713,7 +713,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec(QStringLiteral("SELECT MAX(version) FROM schema_version")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 3);
+            QCOMPARE(q.value(0).toInt(), 4);
             QVERIFY(q.exec(QStringLiteral("PRAGMA table_info(courses)")));
             QStringList columns;
             while (q.next()) {
@@ -722,6 +722,17 @@ private slots:
             QVERIFY(columns.contains(QStringLiteral("last_synced_at")));
             QVERIFY(columns.contains(QStringLiteral("assignment_count")));
             QVERIFY(columns.contains(QStringLiteral("source")));
+            // v4：作业表带上类型列，历史数据回填 homework
+            QVERIFY(q.exec(QStringLiteral("PRAGMA table_info(assignments)")));
+            QStringList assignmentColumns;
+            while (q.next()) {
+                assignmentColumns << q.value(1).toString();
+            }
+            QVERIFY(assignmentColumns.contains(QStringLiteral("kind")));
+            QVERIFY(q.exec(QStringLiteral(
+                "SELECT kind FROM assignments WHERE source_id = 'homework-70001'")));
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toString(), QStringLiteral("homework"));
             db.close();
         }
         QSqlDatabase::removeDatabase(check);
@@ -775,6 +786,47 @@ private slots:
         // 结构没变：清空后可以继续正常写入
         QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(), courses));
         QCOMPARE(repo->listCourses().size(), 2);
+    }
+
+    /// v4：条目类型（作业/考试）能写能读，默认 homework
+    void assignments_kindRoundTrips()
+    {
+        auto repo = openRepo(QStringLiteral("_kind"));
+        const QString courseId = QStringLiteral("90001");
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(),
+                                          coursesFrom(fixtures::myCoursesTwoCourses())));
+
+        // 与真实同步一致：一门课的作业 + 考试合并在同一次快照里写入
+        QList<Assignment> combined =
+            assignmentsFrom(fixtures::homeworkActivitiesThree(), courseId);
+        Assignment exam;
+        exam.courseId = courseId;
+        exam.sourceId = QStringLiteral("exam-81001");
+        exam.activityId = QStringLiteral("81001");
+        exam.kind = QStringLiteral("exam");
+        exam.title = Observed<QString>::present(QStringLiteral("期中测试"));
+        exam.status = Observed<AssignmentStatus>::present(AssignmentStatus::Submitted);
+        exam.submitted = Observed<bool>::present(true);
+        exam.observedAt = fixtures::observedBeforeDeadlines();
+        combined.append(exam);
+
+        const BatchApplyResult applied = repo->applyAssignmentSnapshot(
+            courseId, combined, 1, 1, QString(), QString(), true, QStringLiteral("full"));
+        QVERIFY2(applied.ok, qPrintable(applied.error));
+
+        int homeworkCount = 0;
+        int examCount = 0;
+        for (const Assignment &a : repo->listAssignments(courseId)) {
+            if (a.kind == QLatin1String("homework")) {
+                ++homeworkCount;
+            } else if (a.kind == QLatin1String("exam")) {
+                ++examCount;
+                QCOMPARE(a.sourceId, QStringLiteral("exam-81001"));
+                QCOMPARE(a.status.require(), AssignmentStatus::Submitted);
+            }
+        }
+        QCOMPARE(homeworkCount, 3);   // 作业条目（解析器默认 kind=homework）
+        QCOMPARE(examCount, 1);
     }
 };
 

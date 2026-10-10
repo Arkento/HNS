@@ -78,6 +78,18 @@ public:
             return;
         }
 
+        // ---- v4 兼容：考试接入后，SyncManager 在作业之后总会请求 /exam-list ----
+        // 绝大多数用例不关心考试；这里默认回放"空考试列表"，除非显式注册了该路径
+        // （setResponse / setSequentialResponses 优先，先命中前面的分支）。
+        // 这样每个既有用例不必逐一声明这个它不关心的接口。
+        if (key.endsWith(QLatin1String("/exam-list"))) {
+            Entry empty;
+            empty.body = QStringLiteral(
+                R"({"exams":[],"total":0,"page":1,"pages":1,"page_size":50})");
+            emitResponse(empty, callback);
+            return;
+        }
+
         Response res;
         res.transportOk = false;
         res.error = QStringLiteral("FakePageBridge: no response registered for '%1'").arg(key);

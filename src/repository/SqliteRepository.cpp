@@ -61,6 +61,7 @@ QStringList schemaStatements()
             "  course_id         TEXT    NOT NULL,"
             "  source_id         TEXT    NOT NULL,"
             "  activity_id       TEXT,"
+            "  kind              TEXT    NOT NULL DEFAULT 'homework',"
             "  title             TEXT,"
             "  description       TEXT,"
             "  detail_url        TEXT,"
@@ -315,6 +316,14 @@ bool SqliteRepository::Impl::migrateSchema(int fromVersion)
         // v3：多站点支持——课程带上来源；历史数据默认视为智汇南雍。
         if (!addColumn(QStringLiteral("courses"), QStringLiteral("source"),
                        QStringLiteral("TEXT NOT NULL DEFAULT 'nju-lms'"))) {
+            return false;
+        }
+    }
+
+    if (fromVersion < 4) {
+        // v4：考试接入——作业表带上类型；历史数据默认视为作业。
+        if (!addColumn(QStringLiteral("assignments"), QStringLiteral("kind"),
+                       QStringLiteral("TEXT NOT NULL DEFAULT 'homework'"))) {
             return false;
         }
     }
@@ -802,15 +811,16 @@ BatchApplyResult SqliteRepository::applyAssignmentSnapshot(const QString &course
 
     QSqlQuery insert(d->db);
     insert.prepare(QStringLiteral(
-        "INSERT INTO assignments (course_id, source_id, activity_id, title, description,"
+        "INSERT INTO assignments (course_id, source_id, activity_id, kind, title, description,"
         " detail_url, published_at, due_at, status, submitted, score, content_hash,"
         " content_signature, observed_at, first_seen_at, last_seen_at, present)"
-        " VALUES (:c, :s, :aid, :title, :desc, :url, :pub, :due, :status, :submitted, :score,"
+        " VALUES (:c, :s, :aid, :kind, :title, :desc, :url, :pub, :due, :status, :submitted,"
+        " :score,"
         " :hash, :sig, :observed, :first, :last, 1)"));
 
     QSqlQuery update(d->db);
     update.prepare(QStringLiteral(
-        "UPDATE assignments SET activity_id=:aid, title=:title, description=:desc,"
+        "UPDATE assignments SET activity_id=:aid, kind=:kind, title=:title, description=:desc,"
         " detail_url=:url, published_at=:pub, due_at=:due, status=:status,"
         " submitted=:submitted, score=:score, content_hash=:hash, content_signature=:sig,"
         " observed_at=:observed, last_seen_at=:last, present=1"
@@ -878,6 +888,8 @@ BatchApplyResult SqliteRepository::applyAssignmentSnapshot(const QString &course
             insert.bindValue(QStringLiteral(":c"), courseId);
             insert.bindValue(QStringLiteral(":s"), incoming.sourceId);
             insert.bindValue(QStringLiteral(":aid"), incoming.activityId);
+            insert.bindValue(QStringLiteral(":kind"),
+                             incoming.kind.isEmpty() ? QStringLiteral("homework") : incoming.kind);
             insert.bindValue(QStringLiteral(":title"), title);
             insert.bindValue(QStringLiteral(":desc"), desc);
             insert.bindValue(QStringLiteral(":url"), url);
@@ -923,6 +935,8 @@ BatchApplyResult SqliteRepository::applyAssignmentSnapshot(const QString &course
                         << "incoming hash:" << incoming.contentHash;
 
         update.bindValue(QStringLiteral(":aid"), incoming.activityId);
+        update.bindValue(QStringLiteral(":kind"),
+                         incoming.kind.isEmpty() ? QStringLiteral("homework") : incoming.kind);
         update.bindValue(QStringLiteral(":title"), title);
         update.bindValue(QStringLiteral(":desc"), desc);
         update.bindValue(QStringLiteral(":url"), url);
@@ -1092,13 +1106,15 @@ Assignment assignmentFromQuery(const QSqlQuery &query)
         a.lastSeenAt = *l;
     }
     a.present = query.value(16).isNull() ? true : (query.value(16).toInt() != 0);
+    const QString kind = query.value(17).toString();
+    a.kind = kind.isEmpty() ? QStringLiteral("homework") : kind;
     return a;
 }
 
 constexpr auto kAssignmentColumns =
     "course_id, source_id, activity_id, title, description, detail_url, published_at, due_at,"
     " status, submitted, score, content_hash, content_signature, observed_at, first_seen_at,"
-    " last_seen_at, present";
+    " last_seen_at, present, kind";
 
 } // namespace
 

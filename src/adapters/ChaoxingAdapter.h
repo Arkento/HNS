@@ -69,7 +69,8 @@ public:
         QList<Course> courses;
     };
 
-    struct WorkListResult
+    /// 列表结果（作业或考试，由调用通道决定；条目自带 kind 区分）
+    struct ListResult
     {
         Error error;
         QList<Assignment> assignments;
@@ -82,7 +83,7 @@ public:
     };
 
     using CourseCallback = std::function<void(const CourseListResult &)>;
-    using WorkCallback = std::function<void(const WorkListResult &)>;
+    using ListCallback = std::function<void(const ListResult &)>;
 
     /**
      * @param profile 与主页面共享的持久化 Profile（Cookie / 登录态互通）
@@ -106,7 +107,10 @@ public:
     void discoverCourses(CourseCallback callback);
 
     /// 获取一门课程的作业列表
-    void fetchWorkList(const Course &course, WorkCallback callback);
+    void fetchWorkList(const Course &course, ListCallback callback);
+
+    /// 获取一门课程的考试列表（考试接入）
+    void fetchExamList(const Course &course, ListCallback callback);
 
     /// 取消进行中的任务：悬挂的回调不会再被触发
     void cancel();

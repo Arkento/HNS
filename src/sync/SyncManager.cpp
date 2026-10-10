@@ -270,13 +270,16 @@ void SyncManager::prepareQuickDiff(const QList<TodoItem> &items)
         QString line;   ///< "courseId|sourceId|endTime"，用于与上一轮快照比对
     };
 
-    // 归一化当前待办集合：只保留作业类型（本项目的采集范围）
+    // 归一化当前待办集合：保留作业与考试（本项目的采集范围；考试接入后同为变更信号）
     QList<Entry> current;
     current.reserve(items.size());
     int ignoredOtherTypes = 0;
     for (const TodoItem &item : items) {
-        if (item.type.compare(QLatin1String("homework"), Qt::CaseInsensitive) != 0) {
-            ++ignoredOtherTypes;   // 测试/问卷等不在采集范围内
+        const bool isHomework =
+            item.type.compare(QLatin1String("homework"), Qt::CaseInsensitive) == 0;
+        const bool isExam = item.type.compare(QLatin1String("exam"), Qt::CaseInsensitive) == 0;
+        if (!isHomework && !isExam) {
+            ++ignoredOtherTypes;   // 问卷/课件等不在采集范围内
             continue;
         }
         const QString sourceId = item.sourceId();
@@ -357,7 +360,7 @@ void SyncManager::prepareQuickDiff(const QList<TodoItem> &items)
 
     d->quickChangedCourses = changed;
     qCInfo(lcSync) << "quick check: todos:" << currentLines.size()
-                   << "ignored(non-homework):" << ignoredOtherTypes
+                   << "ignored(other types):" << ignoredOtherTypes
                    << "new items:" << newItems
                    << "deadline mismatches:" << deadlineMismatches
                    << "courses needing deep scan:" << changed.size();
@@ -511,27 +514,94 @@ void SyncManager::processNextCourse()
     const QString courseId = d->currentCourse.courseId;
     d->adapter->fetchAssignments(
         courseId, [this, courseId](const NjuLmsAdapter::AssignmentListResult &result) {
-            // 说明补全：只有在接口本身成功、开关打开、且确实有作业缺正文时才多发一个请求
-            bool needsEnrichment = false;
-            if (result.error.ok() && d->config.enrichDescriptions) {
-                for (const Assignment &item : result.assignments) {
-                    if (!item.description.hasValue()) {
-                        needsEnrichment = true;
-                        break;
-                    }
-                }
-            }
-            if (!needsEnrichment) {
+            if (!result.error.ok()) {
+                // 作业列表失败：与以前一致，直接交结果（考试不再尝试，避免连续无效请求）
                 handleCourseResult(courseId, result);
                 return;
             }
 
-            enrichDescriptions(
-                courseId, result,
-                [this, courseId](const NjuLmsAdapter::AssignmentListResult &merged) {
-                    handleCourseResult(courseId, merged);
+            // 作业成功 → 再取考试列表，合并为一门课的统一快照（考试接入）
+            d->adapter->fetchExams(
+                courseId,
+                [this, courseId, result](const NjuLmsAdapter::ExamListResult &exams) {
+                    NjuLmsAdapter::AssignmentListResult merged = result;
+                    mergeExamResult(courseId, merged, exams);
+                    continueCourseAfterExams(courseId, merged);
                 });
         });
+}
+
+/**
+ * 考试合并完成后的收尾：按需补全作业说明，然后写库。
+ *
+ * 说明补全只针对"作业"条目：考试没有活动接口可补，且 exam-* 条目
+ * 绝不参与 byActivity 匹配（避免万一 id 相撞被填错正文）。
+ */
+void SyncManager::continueCourseAfterExams(const QString &courseId,
+                                           const NjuLmsAdapter::AssignmentListResult &merged)
+{
+    bool needsEnrichment = false;
+    if (d->config.enrichDescriptions) {
+        for (const Assignment &item : merged.assignments) {
+            if (item.kind == QLatin1String("homework") && !item.description.hasValue()) {
+                needsEnrichment = true;
+                break;
+            }
+        }
+    }
+    if (!needsEnrichment) {
+        handleCourseResult(courseId, merged);
+        return;
+    }
+
+    enrichDescriptions(courseId, merged,
+                       [this, courseId](const NjuLmsAdapter::AssignmentListResult &enriched) {
+                           handleCourseResult(courseId, enriched);
+                       });
+}
+
+/**
+ * 把考试列表合并进作业列表（考试接入，2026-10-10）。
+ *
+ * 规则：
+ *   - 考试条目直接追加（sourceId 前缀 exam-，与作业的 homework- 天然不冲突，仍做去重防御）；
+ *   - 考试接口失败或信封不符：保留已取到的作业数据，但把整门课标记为**快照不完整**
+ *     （snapshotComplete=false → 仓储不做软删除）——宁可保留旧数据，不可误删；
+ *     并追加一条 Invalid 解析问题写入 parse_errors，便于排查；
+ *   - 只有作业与考试两份列表都完整时，整门课才允许软删除对账。
+ */
+void SyncManager::mergeExamResult(const QString &courseId,
+                                  NjuLmsAdapter::AssignmentListResult &merged,
+                                  const NjuLmsAdapter::ExamListResult &exams)
+{
+    if (!exams.error.ok()) {
+        merged.issues.append(ParseIssue(
+            QStringLiteral("exam-list"),
+            QStringLiteral("exam list unavailable: %1").arg(exams.error.message),
+            FieldState::Invalid));
+        merged.snapshotComplete = false;
+        qCWarning(lcSync) << "exam list unavailable;"
+                          << "course:" << redact::courseId(courseId)
+                          << "needsLogin:" << exams.error.needsLogin()
+                          << "reason:" << exams.error.message;
+        return;
+    }
+
+    merged.issues.append(exams.issues);
+    for (const Assignment &exam : exams.exams) {
+        const auto duplicate = std::find_if(
+            merged.assignments.cbegin(), merged.assignments.cend(),
+            [&exam](const Assignment &existing) { return existing.sourceId == exam.sourceId; });
+        if (duplicate == merged.assignments.cend()) {
+            merged.assignments.append(exam);
+        }
+    }
+    merged.snapshotComplete = merged.snapshotComplete && exams.snapshotComplete;
+
+    qCInfo(lcSync) << "exams merged;"
+                   << "course:" << redact::courseId(courseId)
+                   << "exams:" << exams.exams.size()
+                   << "complete:" << exams.snapshotComplete;
 }
 
 /**
@@ -575,6 +645,9 @@ void SyncManager::enrichDescriptions(
 
             int filled = 0;
             for (Assignment &item : merged.assignments) {
+                if (item.kind != QLatin1String("homework")) {
+                    continue;   // 考试不参与活动接口的正文补全
+                }
                 if (item.description.hasValue()) {
                     continue;
                 }

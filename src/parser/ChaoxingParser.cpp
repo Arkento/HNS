@@ -3,6 +3,8 @@
 #include <QHash>
 #include <QRegularExpression>
 #include <QStringList>
+#include <QUrl>
+#include <QUrlQuery>
 
 namespace njulms {
 namespace {
@@ -66,7 +68,8 @@ AssignmentStatus statusFromText(const QString &text, bool pastDue)
         return AssignmentStatus::Submitted;
     }
     if (text.contains(QStringLiteral("未完成")) || text.contains(QStringLiteral("未交"))
-        || text.contains(QStringLiteral("待完成"))) {
+        || text.contains(QStringLiteral("待完成")) || text.contains(QStringLiteral("未开始"))
+        || text.contains(QStringLiteral("进行中"))) {
         return pastDue ? AssignmentStatus::Overdue : AssignmentStatus::Pending;
     }
     return AssignmentStatus::Unknown;
@@ -231,6 +234,113 @@ QList<Assignment> ChaoxingParser::parseWorkList(const QString &html, const QStri
         }
     }
     return assignments;
+}
+
+QList<Assignment> ChaoxingParser::parseExamList(const QString &html, const QString &courseId,
+                                                const QString &examListUrl,
+                                                const QDateTime &observedAt,
+                                                ParseIssues *issues)
+{
+    QList<Assignment> exams;
+
+    static const QRegularExpression itemRe(
+        QStringLiteral("<li[^>]*>(.*?)</li>"), QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression onclickRe(
+        QStringLiteral("onclick=\"([A-Za-z0-9_]+)\\('(\\d+)','(\\d+)'\\)\""));
+    static const QRegularExpression titleRe(
+        QStringLiteral("<p[^>]*class=\"[^\"]*overHidden2[^\"]*\"[^>]*>(.*?)</p>"),
+        QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression statusRe(
+        QStringLiteral("<p[^>]*class=\"[^\"]*status[^\"]*\"[^>]*>(.*?)</p>"),
+        QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression timeRe(
+        QStringLiteral("<div[^>]*class=\"([^\"]*time[^\"]*)\"[^>]*>(.*?)</div>"),
+        QRegularExpression::DotMatchesEverythingOption);
+
+    // 列表 URL 里的课程参数：用于构造"查看答卷"链接（与站点自己的 viewExamAnswer 一致）
+    const QUrl listUrl(examListUrl);
+    const QUrlQuery query(listUrl);
+    const QString courseid = query.queryItemValue(QStringLiteral("courseid"));
+    const QString clazzid = query.queryItemValue(QStringLiteral("clazzid"));
+    const QString cpi = query.queryItemValue(QStringLiteral("cpi"));
+
+    auto it = itemRe.globalMatch(html);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        const QString body = match.captured(1);
+
+        // 只认"带两个数字参数的 onclick"的条目：对话框等无关 <li> 会被自然跳过
+        const QRegularExpressionMatch onclickMatch = onclickRe.match(body);
+        if (!onclickMatch.hasMatch()) {
+            continue;
+        }
+        const QString fn = onclickMatch.captured(1);
+        const QString examId = onclickMatch.captured(2);
+        const QString answerId = onclickMatch.captured(3);
+
+        QString title = stripTags(titleRe.match(body).captured(1));
+        if (title.isEmpty()) {
+            title = QStringLiteral("（标题未获取）");
+        }
+        const QString statusText = stripTags(statusRe.match(body).captured(1));
+
+        // 时间块（未完成/进行中的考试可能出现；已完成条目不显示时间）
+        const QRegularExpressionMatch timeMatch = timeRe.match(body);
+        const QString timeClass = timeMatch.hasMatch() ? timeMatch.captured(1) : QString();
+        const QString timeText = timeMatch.hasMatch() ? stripTags(timeMatch.captured(2)) : QString();
+        const bool pastDue = timeClass.contains(QStringLiteral("over"))
+                             || timeText.contains(QStringLiteral("已过期"))
+                             || timeText.contains(QStringLiteral("已结束"));
+        const QDateTime dueAt = deadlineFromRemaining(timeText, observedAt);
+
+        Assignment a;
+        a.kind = QStringLiteral("exam");
+        a.courseId = courseId;
+        a.sourceId = QStringLiteral("cx-exam-%1").arg(examId);
+        a.activityId = examId;
+        a.title = Observed<QString>::present(title);
+        a.dueAt = dueAt.isValid() ? Observed<QDateTime>::present(dueAt)
+                                  : Observed<QDateTime>::missing();
+        a.status = statusText.isEmpty() ? Observed<AssignmentStatus>::missing()
+                                        : Observed<AssignmentStatus>::present(
+                                              statusFromText(statusText, pastDue));
+        if (a.status.hasValue()) {
+            a.submitted = Observed<bool>::present(a.status.require() == AssignmentStatus::Submitted);
+        } else {
+            a.submitted = Observed<bool>::missing();
+        }
+        a.score = Observed<double>::missing();
+        a.description = Observed<QString>::missing();
+        a.publishedAt = Observed<QDateTime>::missing();
+        a.observedAt = observedAt;
+
+        // 详情链接（见头文件说明）：已完成 → 查看答卷页；其它 → 列表页兜底
+        QString detailUrl;
+        if (fn == QLatin1String("viewExamAnswer") && !courseid.isEmpty() && !clazzid.isEmpty()
+            && !cpi.isEmpty()) {
+            detailUrl = QStringLiteral("https://mooc1.chaoxing.com/exam-ans/exam/test/look"
+                                       "?courseId=%1&classId=%2&examId=%3&examAnswerId=%4&cpi=%5")
+                            .arg(courseid, clazzid, examId, answerId, cpi);
+        } else if (!examListUrl.isEmpty()) {
+            detailUrl = examListUrl;
+        }
+        a.detailUrl = detailUrl.isEmpty() ? Observed<QString>::missing()
+                                          : Observed<QString>::present(detailUrl);
+
+        exams.append(a);
+    }
+
+    if (exams.isEmpty() && issues != nullptr) {
+        // 显式空列表（页面写明"暂无考试"）是权威结论；读不出内容才记 Missing
+        static const QRegularExpression emptyRe(QStringLiteral("暂无考试"));
+        if (!emptyRe.match(html).hasMatch()) {
+            issues->append(ParseIssue(
+                QStringLiteral("chaoxing.examlist"),
+                QStringLiteral("no exam items found (template changed, empty list, or not logged in)"),
+                FieldState::Missing));
+        }
+    }
+    return exams;
 }
 
 } // namespace njulms

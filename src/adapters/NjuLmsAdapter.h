@@ -102,6 +102,17 @@ public:
         bool paginated = false;
     };
 
+    /// 考试列表结果（考试接入，2026-10-10）。
+    struct ExamListResult
+    {
+        Error error;
+        QList<Assignment> exams;
+        ParseIssues issues;
+        /// 服务端给了 total 且条数与之一致时才算完整
+        bool snapshotComplete = false;
+        int reportedTotal = -1;
+    };
+
     /// 课程任务（作业 + 测试等）结果。当前仅覆盖 homework 类型条目。
     struct CourseTaskResult
     {
@@ -194,6 +205,17 @@ public:
                           std::function<void(const AssignmentListResult &)> callback);
 
     /**
+     * 获取某门课程的考试列表（考试接入）。
+     *
+     * [实测 2026-10-10] GET /api/courses/{id}/exam-list?page=1&page_size=N&reloadPage=false
+     *   响应 {"exams":[…], "total":n, "page":…, "pages":…, "page_size":…}
+     * 接口路径与信封来自站点自身前端代码（static/67958-55938765.js 的 initExamsWithPage）。
+     * 本账号当前所有课程 exams 为空数组，因此条目字段解析按"前端代码实测 + 防御式读取"处理，
+     * 详见 AssignmentParser::parseExamList。
+     */
+    void fetchExams(const QString &courseId, std::function<void(const ExamListResult &)> callback);
+
+    /**
      * 获取课程任务列表（作业与测试等活动的合集入口）。
      *
      * [实测] GET /api/courses/{id}/activities 存在并返回 200，载荷为 {"activities":[...]}。
@@ -235,6 +257,12 @@ private:
                               int page,
                               std::shared_ptr<AssignmentListResult> accumulated,
                               std::function<void(const AssignmentListResult &)> callback);
+
+    /// 取某一页考试并按稳定标识合并进 accumulated，必要时自动递归取下一页。
+    void fetchExamsPage(const QString &courseId,
+                        int page,
+                        std::shared_ptr<ExamListResult> accumulated,
+                        std::function<void(const ExamListResult &)> callback);
 
     class Impl;
     std::unique_ptr<Impl> d;

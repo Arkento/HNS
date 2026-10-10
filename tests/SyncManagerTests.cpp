@@ -945,6 +945,42 @@ private slots:
         QCOMPARE(h.repo->countAssignments(QStringLiteral("90001")), 3);
         QCOMPARE(h.repo->countAssignments(QStringLiteral("90002")), 3);
     }
+
+    /// 考试接入：作业 + 考试合并写入同一门课的快照，kind 区分且状态正确
+    void examMerge_storesExamsWithKindAlongsideHomework()
+    {
+        Harness h = makeHarness(QStringLiteral("exams"));
+        registerTwoCourses(*h.bridge);
+        // 90001 显式给出两场考试；90002 走 FakePageBridge 的默认空考试列表
+        h.bridge->setResponse(QStringLiteral("/api/courses/90001/exam-list"),
+                              fixtures::examListTwoExams());
+        runFullScanToSuccess(h);
+
+        const QList<Assignment> items = h.repo->listAssignments(QStringLiteral("90001"));
+        int homework = 0;
+        int exams = 0;
+        for (const Assignment &a : items) {
+            if (a.kind == QLatin1String("homework")) {
+                ++homework;
+            } else if (a.kind == QLatin1String("exam")) {
+                ++exams;
+                if (a.activityId == QLatin1String("81001")) {
+                    QCOMPARE(a.sourceId, QStringLiteral("exam-81001"));
+                    QCOMPARE(a.submitted.require(), true);
+                    QCOMPARE(a.status.require(), AssignmentStatus::Submitted);
+                    QCOMPARE(a.score.require(), 88.5);
+                } else if (a.activityId == QLatin1String("81002")) {
+                    QCOMPARE(a.submitted.require(), false);
+                    QCOMPARE(a.status.require(), AssignmentStatus::Pending);
+                }
+            }
+        }
+        QCOMPARE(homework, 3);
+        QCOMPARE(exams, 2);
+
+        // 90002 只有作业（考试为空列表是权威结果，不新增记录）
+        QCOMPARE(h.repo->countAssignments(QStringLiteral("90002")), 3);
+    }
 };
 
 QTEST_MAIN(SyncManagerTests)

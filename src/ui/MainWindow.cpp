@@ -246,6 +246,7 @@ protected:
 /// 作业表格列
 enum Column {
     ColStatus = 0,
+    ColKind,
     ColTitle,
     ColDue,
     ColDueRelative,
@@ -344,6 +345,9 @@ QJsonObject assignmentRow(const Course &course, const Assignment &item, bool wit
     // 多站点：来源键（机器读） + 来源标签（直接显示）
     row.insert(QStringLiteral("source"), course.source);
     row.insert(QStringLiteral("sourceLabel"), sourceDisplay(course.source));
+    // 条目类型：作业 / 考试（考试接入）
+    row.insert(QStringLiteral("kind"), item.kind);
+    row.insert(QStringLiteral("kindLabel"), assignmentKindDisplay(item.kind));
 
     // 原站详情链接（前端那个「↗」按钮用）。
     // 只放行 https + 已知站点域名（南大 / 学习通）：详情链接是按站点路由
@@ -1372,9 +1376,9 @@ void MainWindow::buildUi()
 
     d->assignmentTable = new QTableWidget(0, ColumnCount, assignmentGroup);
     d->assignmentTable->setHorizontalHeaderLabels(
-        {QStringLiteral("状态"), QStringLiteral("标题"), QStringLiteral("截止时间（北京时间）"),
-         QStringLiteral("剩余"), QStringLiteral("发布时间"), QStringLiteral("得分"),
-         QStringLiteral("来源 ID"), QStringLiteral("来源")});
+        {QStringLiteral("状态"), QStringLiteral("类型"), QStringLiteral("标题"),
+         QStringLiteral("截止时间（北京时间）"), QStringLiteral("剩余"), QStringLiteral("发布时间"),
+         QStringLiteral("得分"), QStringLiteral("来源 ID"), QStringLiteral("来源")});
     d->assignmentTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     d->assignmentTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     d->assignmentTable->setAlternatingRowColors(true);
@@ -1384,6 +1388,7 @@ void MainWindow::buildUi()
         QHeaderView *header = d->assignmentTable->horizontalHeader();
         header->setStretchLastSection(false);
         header->setSectionResizeMode(ColStatus, QHeaderView::ResizeToContents);
+        header->setSectionResizeMode(ColKind, QHeaderView::ResizeToContents);
         header->setSectionResizeMode(ColTitle, QHeaderView::Stretch);
         header->setSectionResizeMode(ColDue, QHeaderView::ResizeToContents);
         header->setSectionResizeMode(ColDueRelative, QHeaderView::ResizeToContents);
@@ -1988,6 +1993,10 @@ void MainWindow::refreshAssignmentTable(const QString &courseId)
             }
         }
         d->assignmentTable->setItem(row, ColStatus, new QTableWidgetItem(statusText));
+
+        // 类型（作业 / 考试）
+        d->assignmentTable->setItem(row, ColKind,
+                                    new QTableWidgetItem(assignmentKindDisplay(a.kind)));
 
         // 标题
         auto *titleItem = new QTableWidgetItem(

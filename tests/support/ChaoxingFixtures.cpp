@@ -95,6 +95,51 @@ QString workListEmptyState()
 )HTML");
 }
 
+QString examListTwoItems()
+{
+    // 第一条的结构与 2026-10-10 实测完全一致（大学进阶英语「Level A Vocab. Quiz 1」）；
+    // 第二条为"未完成"的形态：同一容器结构、onclick 换进入考试的函数、带剩余时间块。
+    return QStringLiteral(R"HTML(
+<div class="exam-list">
+<ul>
+<li>
+  <div style="float: left; width:100%;" tabindex="0" role="option" onclick="viewExamAnswer('900001','800001')">
+    <div class="tag icon-exam-g icon-exam-g"></div>
+    <div class="right-content">
+      <p class="overHidden2 fl">Level A Vocab. Quiz 1</p>
+      <div class="clear"></div>
+      <p class="status fl">已完成</p>
+    </div>
+  </div>
+  <div class="clear"></div>
+</li>
+<li>
+  <div style="float: left; width:100%;" tabindex="0" role="option" onclick="enterExam('900002','800002')">
+    <div class="tag icon-exam-g icon-exam-g"></div>
+    <div class="right-content">
+      <p class="overHidden2 fl">期末考试</p>
+      <div class="clear"></div>
+      <p class="status fl">未完成</p>
+      <div class="time notOver">剩余3天2小时</div>
+    </div>
+  </div>
+  <div class="clear"></div>
+</li>
+</ul>
+</div>
+)HTML");
+}
+
+QString examListEmptyState()
+{
+    return QStringLiteral(R"HTML(
+<div class="exam-list">
+  <div class="null-data" style="font-size: 14px;">暂无考试</div>
+  <div class="pagePosition"><div class="pageDiv" id="page"></div></div>
+</div>
+)HTML");
+}
+
 } // namespace chaoxing_fixtures
 } // namespace test
 } // namespace njulms

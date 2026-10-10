@@ -44,10 +44,10 @@ constexpr int kIframePollIntervalMs = 250;
 constexpr int kContentPollAttempts = 80;   // ≈20 秒（间隔缩到 250ms 后保持同样的等待窗口）
 
 /**
- * 「找作业入口」的窗口 ≈4 秒（16 轮）。
- * 实测课程页的「作业」入口都在 2.5 秒内渲染出来；4 秒里（含 4 次点击机会）
- * 基本可以认定这门课没有作业入口（新版 AI 布局 / 考试专用课），早点跳过，
- * 不必白等 20 秒。拿到入口之后等待列表地址的窗口仍然是 20 秒。
+ * 「找作业/考试入口」的窗口 ≈4 秒（16 轮）。
+ * 实测课程页的「作业」「考试」入口都在 2.5 秒内渲染出来；4 秒里（含 4 次点击机会）
+ * 还找不到就基本可以认定这门课没有该入口，早点跳过，不必白等 20 秒。
+ * 拿到入口之后等待列表地址的窗口仍然是 20 秒。
  */
 constexpr int kEntrySearchTicks = 16;
 
@@ -101,6 +101,45 @@ constexpr auto kWorkTabDiagnosticScript = R"JS((() => {
   });
 })())JS";
 
+// ---------------------------------------------------------------------------
+// 考试（考试接入，2026-10-10）——与作业同一套流程，只换了标签文本与 URL 特征：
+// 实测：点课程页「考试」标签后页面创建 iframe，
+//       src = mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list?…
+// ---------------------------------------------------------------------------
+
+constexpr auto kClickExamTabScript = R"JS((() => {
+  const nodes = [...document.querySelectorAll('a,li,span,div')]
+    .filter((n) => n.children.length === 0 && (n.textContent || '').trim() === '考试');
+  if (!nodes.length) return 'notfound';
+  const el = nodes.find((n) => /nav|tab/i.test(n.className || '')) || nodes[0];
+  (el.closest('a') || el).click();
+  return 'clicked';
+})())JS";
+
+constexpr auto kReadExamListUrlScript = R"JS((() => {
+  const href = location.href || '';
+  if (/exam-list/.test(href)) return href;
+  const frames = [...document.querySelectorAll('iframe')];
+  const hit = frames.find((f) => /exam-list/.test(f.src || ''));
+  return hit ? hit.src : '';
+})())JS";
+
+constexpr auto kExamListRenderedScript = R"JS((() => {
+  const html = document.documentElement ? document.documentElement.outerHTML : '';
+  return /暂无考试/.test(html) || /exam\/test\/look/.test(html)
+      || /onclick="[A-Za-z0-9_]+\(\d+,\d+\)"/.test(html)
+      || /onclick="[A-Za-z0-9_]+\('\d+','\d+'\)"/.test(html);
+})())JS";
+
+constexpr auto kExamTabDiagnosticScript = R"JS((() => {
+  const leaves = [...document.querySelectorAll('span,a,li,div')]
+    .filter((n) => n.children.length === 0 && (n.textContent || '').trim() === '考试').length;
+  return JSON.stringify({
+    workLeaves: leaves,
+    frames: [...document.querySelectorAll('iframe')].map((f) => (f.src || '').slice(0, 100)),
+  });
+})())JS";
+
 /// 日志用的安全 URL：只保留 scheme/host/path，绝不带查询串（含会话参数 s/enc）
 QString safeUrlForLog(const QUrl &url)
 {
@@ -148,13 +187,16 @@ bool evidenceOfMorePages(const QString &html)
 class ChaoxingAdapter::Impl
 {
 public:
+    /// 要采集的列表类型：作业 / 考试（流程完全相同，脚本与缓存分开）
+    enum class ListKind { Work, Exam };
+
     enum class Stage {
         Idle,
         Home,
         CourseCenter,
-        CoursePage,   ///< 首次进入课程页：点「作业」
-        CourseReady,  ///< 已点过「作业」：等轮询拿到列表地址（避免重复点击）
-        WorkList,
+        CoursePage,   ///< 首次进入课程页：点「作业」/「考试」
+        CourseReady,  ///< 已点过标签：等轮询拿到列表地址（避免重复点击）
+        ListPage,     ///< 已进入作业/考试列表页
     };
     enum class Mode { None, Courses, Work };
 
@@ -196,22 +238,27 @@ public:
         navigate(QString::fromLatin1(kHomeUrl), Stage::Home, kHomeStageTimeoutMs);
     }
 
-    void startWork(const Course &course, WorkCallback callback)
+    void startList(const Course &course, ListKind kind, ListCallback callback)
     {
         begin(Mode::Work);
         currentCourse = course;
+        listKind = kind;
         workTabClicked = false;
-        workCb = std::move(callback);
+        listCb = std::move(callback);
 
-        // 会话内缓存：同一门课的作业列表地址（enc 由页面生成、同一门课在同一会话里稳定）。
+        const bool isExam = kind == ListKind::Exam;
+        const QString label = isExam ? QStringLiteral("考试") : QStringLiteral("作业");
+
+        // 会话内缓存：同一门课的列表地址（enc 由页面生成、同一门课在同一会话里稳定）。
         // 直接复用可以跳过"课程页 + 点击 + 等 iframe"这三步（实测这三步是慢的部分），
         // 把重复同步从每门课 ~3 秒降到 ~1 秒。地址失效时自动回退到完整流程并刷新缓存。
-        if (workUrlCache.contains(course.courseId)) {
+        const QHash<QString, QString> &cache = isExam ? examUrlCache : workUrlCache;
+        if (cache.contains(course.courseId)) {
             workByCachedUrl = true;
             triedCacheFallback = false;
-            q->stageMessage(
-                QStringLiteral("学习通：正在读取「%1」的作业列表…").arg(course.courseName));
-            navigate(workUrlCache.value(course.courseId), Stage::WorkList);
+            q->stageMessage(QStringLiteral("学习通：正在读取「%1」的%2列表…")
+                                .arg(course.courseName, label));
+            navigate(cache.value(course.courseId), Stage::ListPage);
             return;
         }
         workByCachedUrl = false;
@@ -230,7 +277,7 @@ public:
         timeout->stop();
         stopPolling();
         courseCb = nullptr;
-        workCb = nullptr;
+        listCb = nullptr;
         page->triggerAction(QWebEnginePage::Stop);
     }
 
@@ -282,10 +329,10 @@ private:
                 cb(CourseListResult{error, {}});
             }
         } else if (mode == Mode::Work) {
-            auto cb = workCb;
+            auto cb = listCb;
             end();
             if (cb) {
-                cb(WorkListResult{error, {}, {}, false});
+                cb(ListResult{error, {}, {}, false});
             }
         } else {
             end();
@@ -296,6 +343,7 @@ private:
     {
         // 会话失效后页面生成的 enc 地址全部作废
         workUrlCache.clear();
+        examUrlCache.clear();
         const QString message = QStringLiteral("需要登录学习通（请扫码）");
         emit q->loginRequired(message);
         fail(ErrorCode::SessionExpired, message);
@@ -311,7 +359,7 @@ private:
         timeout->stop();
         stopPolling();
         courseCb = nullptr;
-        workCb = nullptr;
+        listCb = nullptr;
     }
 
     void onLoadFinished(bool ok)
@@ -336,7 +384,7 @@ private:
         case Stage::CourseCenter: afterCourseCenter(); break;
         case Stage::CoursePage:  afterCoursePage(); break;
         case Stage::CourseReady: break;   // 点击后的次级加载：交给轮询处理
-        case Stage::WorkList:    afterWorkList(); break;
+        case Stage::ListPage:    afterListPage(); break;
         case Stage::Idle:        break;
         }
     }
@@ -455,26 +503,39 @@ private:
         });
     }
 
-    // ---- 作业列表 ----------------------------------------------------------
+    // ---- 作业 / 考试列表（同一套流程，脚本与缓存按 kind 切换）-----------------
+
+    bool isExamKind() const noexcept { return listKind == ListKind::Exam; }
+
+    QString listLabel() const
+    {
+        return isExamKind() ? QStringLiteral("考试") : QStringLiteral("作业");
+    }
+
+    QHash<QString, QString> &urlCache()
+    {
+        return isExamKind() ? examUrlCache : workUrlCache;
+    }
 
     void afterCoursePage()
     {
-        qCDebug(lcChaoxing) << "course page loaded:" << safeUrlForLog(page->url());
-        // 先切到"已点击"阶段：点击可能让顶层页面直接导航到作业列表，
+        qCDebug(lcChaoxing) << "course page loaded:" << safeUrlForLog(page->url())
+                            << "kind:" << (isExamKind() ? "exam" : "work");
+        // 先切到"已点击"阶段：点击可能让顶层页面直接导航到列表页，
         // 那次导航的 loadFinished 不能再次触发点击（否则会死循环）。
         stage = Stage::CourseReady;
-        // 课程页的导航栏同样由页面 JS 渲染：loadFinished 时刻可能还没有
-        // 「作业」入口。因此点击也放进轮询：先等入口出现并点击，再等列表地址。
+        // 课程页的导航栏同样由页面 JS 渲染：loadFinished 时刻可能还没有入口。
+        // 因此点击也放进轮询：先等入口出现并点击，再等列表地址。
         startPolling([this]() {
             if (pollsExhausted()) {
                 stopPolling();
-                onWorkTabTimeout();
+                onTabTimeout();
                 return;
             }
-            // 3 秒内找不到「作业」入口 → 判定该课程没有作业入口（快速跳过）
+            // 窗口内找不到入口 → 判定该课程没有这个入口（快速跳过）
             if (!workTabClicked && pollAttempts > kEntrySearchTicks) {
                 stopPolling();
-                onWorkTabTimeout();
+                onTabTimeout();
                 return;
             }
             // 入口刚出现时点击可能是空操作（事件尚未绑定），因此未拿到列表地址前：
@@ -482,53 +543,63 @@ private:
             const bool clickFast = pollAttempts <= 24 && pollAttempts % 4 == 1;
             const bool clickSlow = pollAttempts % 16 == 1;
             if (clickFast || clickSlow) {
-                runJs(QString::fromUtf8(kClickWorkTabScript), [this](const QVariant &value) {
+                const auto script = isExamKind() ? QString::fromUtf8(kClickExamTabScript)
+                                                 : QString::fromUtf8(kClickWorkTabScript);
+                runJs(script, [this](const QVariant &value) {
                     if (value.toString() == QLatin1String("clicked")) {
                         workTabClicked = true;
-                        q->stageMessage(QStringLiteral("学习通：正在打开作业列表…"));
+                        q->stageMessage(QStringLiteral("学习通：正在打开%1列表…").arg(listLabel()));
                     }
                     // notfound：入口还没渲染出来，下一轮再试
                 });
             }
-            runJs(QString::fromUtf8(kReadWorkListUrlScript), [this](const QVariant &value) {
+            const auto readScript = isExamKind() ? QString::fromUtf8(kReadExamListUrlScript)
+                                                 : QString::fromUtf8(kReadWorkListUrlScript);
+            runJs(readScript, [this](const QVariant &value) {
                 const QString url = value.toString();
                 if (url.isEmpty()) {
                     return;   // 下一轮
                 }
                 stopPolling();
-                qCDebug(lcChaoxing) << "work list url captured:" << safeUrlForLog(QUrl(url));
+                qCDebug(lcChaoxing) << "list url captured:" << safeUrlForLog(QUrl(url))
+                                    << "kind:" << (isExamKind() ? "exam" : "work");
                 if (url == page->url().toString()) {
                     // 顶层页面已经跳到列表页：直接读，不再重复导航
-                    stage = Stage::WorkList;
-                    afterWorkList();
+                    stage = Stage::ListPage;
+                    afterListPage();
                 } else {
-                    navigate(url, Stage::WorkList);
+                    navigate(url, Stage::ListPage);
                 }
             });
         });
     }
 
     /**
-     * 「作业」轮询耗尽：先取一次现场（入口是否出现过、有哪些 iframe），再决定语义。
-     *  - 从未点到入口 → 判定"该课程没有作业入口"，返回空结果 + ParseIssue（跳过，不算失败）
+     * 入口轮询耗尽：先取一次现场（入口是否出现过、有哪些 iframe），再决定语义。
+     *  - 从未点到入口 → 判定"该课程没有这个入口"，返回空结果 + ParseIssue（跳过，不算失败）
      *  - 点到了但列表没出现 → 结构错误（可能改版），按失败处理
      */
-    void onWorkTabTimeout()
+    void onTabTimeout()
     {
-        runJs(QString::fromUtf8(kWorkTabDiagnosticScript), [this](const QVariant &value) {
-            qCDebug(lcChaoxing) << "work tab timeout;" << "clicked:" << workTabClicked
+        const auto diagnostic = isExamKind() ? QString::fromUtf8(kExamTabDiagnosticScript)
+                                             : QString::fromUtf8(kWorkTabDiagnosticScript);
+        runJs(diagnostic, [this](const QVariant &value) {
+            qCDebug(lcChaoxing) << "tab timeout;" << "kind:" << (isExamKind() ? "exam" : "work")
+                                << "clicked:" << workTabClicked
                                 << "diagnostics:" << value.toString();
             if (workTabClicked) {
                 fail(ErrorCode::UnexpectedShape,
-                     QStringLiteral("点击「作业」后没有出现作业列表（可能已改版）"));
+                     QStringLiteral("点击「%1」后没有出现列表（可能已改版）").arg(listLabel()));
                 return;
             }
-            WorkListResult result;
+            ListResult result;
             result.issues.append(ParseIssue(
-                QStringLiteral("chaoxing.worktab"),
-                QStringLiteral("course has no 作业 entry (likely no homework)"),
+                isExamKind() ? QStringLiteral("chaoxing.examtab")
+                             : QStringLiteral("chaoxing.worktab"),
+                isExamKind() ? QStringLiteral("course has no 考试 entry (likely no exam)")
+                             : QStringLiteral("course has no 作业 entry (likely no homework)"),
                 FieldState::Missing));
-            auto cb = workCb;
+            auto cb = listCb;
             end();
             if (cb) {
                 cb(result);
@@ -536,28 +607,37 @@ private:
         });
     }
 
-    void afterWorkList()
+    void afterListPage()
     {
-        qCDebug(lcChaoxing) << "work list loaded:" << safeUrlForLog(page->url());
-        // 列表条目同样由页面 JS 渲染：等出现后条目骨架（work/task 或分页容器）再读。
+        qCDebug(lcChaoxing) << "list page loaded:" << safeUrlForLog(page->url())
+                            << "kind:" << (isExamKind() ? "exam" : "work");
+        // 列表条目同样由页面 JS 渲染：等条目骨架出现后再读。
         startPolling([this]() {
             if (pollsExhausted()) {
                 stopPolling();
                 fail(ErrorCode::UnexpectedShape,
-                     QStringLiteral("作业列表没有渲染出内容（模板改版或未登录）"));
+                     QStringLiteral("%1列表没有渲染出内容（模板改版或未登录）").arg(listLabel()));
                 return;
             }
-            runJs(QString::fromUtf8(kWorkListRenderedScript), [this](const QVariant &value) {
+            const auto renderedScript = isExamKind() ? QString::fromUtf8(kExamListRenderedScript)
+                                                     : QString::fromUtf8(kWorkListRenderedScript);
+            runJs(renderedScript, [this](const QVariant &value) {
                 if (!value.toBool()) {
                     return;   // 下一轮
                 }
                 stopPolling();
                 readHtmlThen([this](const QString &html) {
-                    qCDebug(lcChaoxing) << "work list html bytes:" << html.size();
+                    qCDebug(lcChaoxing) << "list html bytes:" << html.size()
+                                        << "kind:" << (isExamKind() ? "exam" : "work");
                     ParseIssues issues;
                     const QDateTime observedAt = timeutil::nowUtc();
-                    QList<Assignment> assignments = ChaoxingParser::parseWorkList(
-                        html, currentCourse.courseId, observedAt, &issues);
+                    const bool isExam = isExamKind();
+                    const QList<Assignment> assignments =
+                        isExam ? ChaoxingParser::parseExamList(html, currentCourse.courseId,
+                                                               page->url().toString(), observedAt,
+                                                               &issues)
+                               : ChaoxingParser::parseWorkList(html, currentCourse.courseId,
+                                                               observedAt, &issues);
 
                     const bool morePages = evidenceOfMorePages(html);
                     if (morePages) {
@@ -567,46 +647,50 @@ private:
                             FieldState::Invalid));
                     }
 
-                    qCDebug(lcChaoxing) << "work items parsed:" << assignments.size()
-                                        << "more pages:" << morePages;
-                    WorkListResult result;
+                    qCDebug(lcChaoxing) << "list items parsed:" << assignments.size()
+                                        << "more pages:" << morePages
+                                        << "kind:" << (isExam ? "exam" : "work");
+                    ListResult result;
                     result.assignments = assignments;
                     result.issues = issues;
                     // 完整快照（可软删除）的判据：
                     //   - 没有分页嫌疑；且
-                    //   - 解析到条目，或页面明确写着"暂无作业"（权威空列表）。
-                    // 模板改版导致的"读不出内容"会带 chaoxing.worklist(Missing) 问题，
-                    // 此时不算完整快照，绝不软删旧数据。
-                    bool worklistUnreadable = false;
+                    //   - 解析到条目，或页面明确写着"暂无作业/暂无考试"（权威空列表）。
+                    // 模板改版导致的"读不出内容"会带 chaoxing.worklist / chaoxing.examlist
+                    // 的 Missing 问题，此时不算完整快照，绝不软删旧数据。
+                    const QString unreadableField =
+                        isExam ? QStringLiteral("chaoxing.examlist")
+                               : QStringLiteral("chaoxing.worklist");
+                    bool listUnreadable = false;
                     for (const ParseIssue &issue : issues) {
-                        if (issue.field == QLatin1String("chaoxing.worklist")
-                            && issue.state == FieldState::Missing) {
-                            worklistUnreadable = true;
+                        if (issue.field == unreadableField && issue.state == FieldState::Missing) {
+                            listUnreadable = true;
                         }
                     }
-                    result.snapshotComplete = !morePages && !worklistUnreadable;
+                    result.snapshotComplete = !morePages && !listUnreadable;
 
                     // 缓存命中却读不出内容（例如地址过期返回"无权限的操作"）：
                     // 清掉这一条并回退到完整流程（课程页 → 点击 → 捕获新地址），
                     // 只回退一次，避免在真正改版时来回打转。
-                    if (workByCachedUrl && worklistUnreadable) {
-                        workUrlCache.remove(currentCourse.courseId);
+                    if (workByCachedUrl && listUnreadable) {
+                        urlCache().remove(currentCourse.courseId);
                         if (!triedCacheFallback) {
                             triedCacheFallback = true;
                             workByCachedUrl = false;
                             workTabClicked = false;
-                            qCDebug(lcChaoxing) << "cached work list url invalid; full flow fallback";
+                            qCDebug(lcChaoxing) << "cached list url invalid; full flow fallback"
+                                                << "kind:" << (isExam ? "exam" : "work");
                             navigate(currentCourse.detailUrl, Stage::CoursePage);
                             return;   // 本次回调继续挂起，走完整流程后再交付结果
                         }
                     }
                     // 完整流程成功：记住这门课的列表地址，供本轮之后（含下一次同步）复用
-                    if (!workByCachedUrl && !worklistUnreadable && !morePages
+                    if (!workByCachedUrl && !listUnreadable && !morePages
                         && page->url().isValid()) {
-                        workUrlCache.insert(currentCourse.courseId, page->url().toString());
+                        urlCache().insert(currentCourse.courseId, page->url().toString());
                     }
 
-                    auto cb = workCb;
+                    auto cb = listCb;
                     end();
                     if (cb) {
                         cb(result);
@@ -629,10 +713,14 @@ private:
     Mode mode = Mode::None;
     Stage stage = Stage::Idle;
     bool expectingLoad = false;
-    /// 本门课程的「作业」入口是否已经点过（点击也要等页面渲染出来）
+    /// 本次要采集的列表类型（作业 / 考试）
+    ListKind listKind = ListKind::Work;
+    /// 本门课程的入口（作业/考试）是否已经点过（点击也要等页面渲染出来）
     bool workTabClicked = false;
     /// 会话内的作业列表地址缓存：courseId → work/list URL（见 startWork 的说明）
     QHash<QString, QString> workUrlCache;
+    /// 会话内的考试列表地址缓存：courseId → exam-list URL（与作业同理）
+    QHash<QString, QString> examUrlCache;
     /// 本次取数是否走的缓存地址（决定失败时要不要回退完整流程）
     bool workByCachedUrl = false;
     /// 本次取数是否已经因缓存失效回退过一次（防止来回打转）
@@ -641,7 +729,7 @@ private:
 
     Course currentCourse;
     CourseCallback courseCb;
-    WorkCallback workCb;
+    ListCallback listCb;
 };
 
 // ---------------------------------------------------------------------------
@@ -684,15 +772,26 @@ void ChaoxingAdapter::discoverCourses(CourseCallback callback)
     d->startCourses(std::move(callback));
 }
 
-void ChaoxingAdapter::fetchWorkList(const Course &course, WorkCallback callback)
+void ChaoxingAdapter::fetchWorkList(const Course &course, ListCallback callback)
 {
     if (d->busy) {
-        callback(WorkListResult{
+        callback(ListResult{
             Error{ErrorCode::Transport, QStringLiteral("上一个学习通任务还没结束")},
             {}, {}, false});
         return;
     }
-    d->startWork(course, std::move(callback));
+    d->startList(course, Impl::ListKind::Work, std::move(callback));
+}
+
+void ChaoxingAdapter::fetchExamList(const Course &course, ListCallback callback)
+{
+    if (d->busy) {
+        callback(ListResult{
+            Error{ErrorCode::Transport, QStringLiteral("上一个学习通任务还没结束")},
+            {}, {}, false});
+        return;
+    }
+    d->startList(course, Impl::ListKind::Exam, std::move(callback));
 }
 
 void ChaoxingAdapter::cancel()

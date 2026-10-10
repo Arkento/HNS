@@ -49,6 +49,15 @@ constexpr QStringView kIsStarted = u"is_started";
 constexpr QStringView kHomeworkActivities = u"homework_activities";
 constexpr QStringView kActivities = u"activities";
 
+// ---- 考试接口字段（实测于站点前端代码，2026-10-10）--------------------------
+// 来源：lms.nju.edu.cn 自己的考试列表页 bundle（static/12308.f90daf57.js）。
+// 该组件从 GET /api/courses/{id}/exam-list 的 exams[] 里读取这些字段。
+constexpr QStringView kExams = u"exams";
+constexpr QStringView kStartTime = u"start_time";
+constexpr QStringView kSubmissionCount = u"submission_count";
+constexpr QStringView kMakeupSubmissionCount = u"makeup_exam_submission_count";
+constexpr QStringView kFinalScore = u"final_score";
+
 /// 作业数组键名，供 parseAssignments 的调用方选择数据源
 constexpr QStringView kType = u"type";
 
@@ -439,9 +448,11 @@ QList<Course> AssignmentParser::parseCourseList(const QJsonObject &root,
 // ---------------------------------------------------------------------------
 
 Assignment AssignmentParser::parseAssignment(const QString &courseId, const QJsonObject &obj,
-                                             const QDateTime &observedAt, ParseIssues *issues)
+                                             const QDateTime &observedAt, ParseIssues *issues,
+                                             const QString &kind)
 {
     Assignment a;
+    a.kind = kind;
     a.courseId = courseId;
     a.observedAt = observedAt;
 
@@ -595,7 +606,8 @@ Assignment AssignmentParser::parseAssignment(const QString &courseId, const QJso
 QList<Assignment> AssignmentParser::parseAssignments(const QString &courseId,
                                                      const QJsonArray &items,
                                                      const QDateTime &observedAt,
-                                                     ParseIssues *issues)
+                                                     ParseIssues *issues,
+                                                     const QString &kind)
 {
     QList<Assignment> out;
     out.reserve(items.size());
@@ -609,7 +621,7 @@ QList<Assignment> AssignmentParser::parseAssignments(const QString &courseId,
             }
             continue;
         }
-        Assignment a = parseAssignment(courseId, v.toObject(), observedAt, issues);
+        Assignment a = parseAssignment(courseId, v.toObject(), observedAt, issues, kind);
         if (a.sourceId.isEmpty()) {
             // 没有稳定标识就无法安全去重，宁可跳过并报错，也不要生成重复记录
             if (issues != nullptr) {
@@ -622,6 +634,167 @@ QList<Assignment> AssignmentParser::parseAssignments(const QString &courseId,
         out.append(a);
     }
 
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// 考试（考试接入，2026-10-10）
+// ---------------------------------------------------------------------------
+
+Assignment AssignmentParser::parseExam(const QString &courseId, const QJsonObject &obj,
+                                       const QDateTime &observedAt, ParseIssues *issues)
+{
+    Assignment a;
+    a.kind = QStringLiteral("exam");
+    a.courseId = courseId;
+    a.observedAt = observedAt;
+
+    // ---- 身份 -------------------------------------------------------------
+    const auto id = readString(obj, field::kId, QStringLiteral("exam.id"), issues);
+    if (id.hasValue()) {
+        a.activityId = id.require();
+    }
+    const auto uniqueKey = readString(obj, field::kUniqueKey,
+                                      QStringLiteral("exam.unique_key"), issues);
+    if (uniqueKey.hasValue() && !uniqueKey.require().isEmpty()) {
+        a.sourceId = uniqueKey.require();
+    } else if (!a.activityId.isEmpty()) {
+        // [推导] 站点规则 "{type}-{id}"（作业侧实测吻合，考试侧按同一规则推导）
+        a.sourceId = QStringLiteral("exam-") + a.activityId;
+    }
+
+    // ---- 内容 -------------------------------------------------------------
+    a.title = readString(obj, field::kTitle, QStringLiteral("exam.title"), issues);
+    const QJsonObject data = subObject(obj, field::kData);
+    if (!data.isEmpty()) {
+        a.description = readString(data, field::kDescription,
+                                   QStringLiteral("exam.data.description"), issues);
+    } else {
+        a.description = Observed<QString>::missing();
+    }
+    // 考试没有"发布时间"字段；start_time 是考试窗口开始，语义不同，不塞进 publishedAt。
+    a.publishedAt = Observed<QDateTime>::missing();
+
+    // ---- 时间：截止 = end_time，缺失时退回 deadline -------------------------
+    a.dueAt = readTime(obj, field::kEndTime, QStringLiteral("exam.end_time"), issues);
+    if (!a.dueAt.isAuthoritative()) {
+        const auto deadline = readTime(obj, field::kDeadline,
+                                       QStringLiteral("exam.deadline"), issues);
+        if (deadline.isAuthoritative()) {
+            a.dueAt = deadline;
+        }
+    }
+
+    // ---- 提交状态：submission_count + makeup_exam_submission_count -----------
+    // 依据：站点前端用它判断 notSubmit（两者都为 0 即未提交）。
+    const auto submissions = readNumber(obj, field::kSubmissionCount,
+                                        QStringLiteral("exam.submission_count"), issues);
+    const auto makeup = readNumber(obj, field::kMakeupSubmissionCount,
+                                   QStringLiteral("exam.makeup_exam_submission_count"), issues);
+    if (submissions.hasValue() || makeup.hasValue()) {
+        const double total = (submissions.hasValue() ? submissions.require() : 0.0)
+                             + (makeup.hasValue() ? makeup.require() : 0.0);
+        a.submitted = Observed<bool>::present(total > 0.0);
+    } else {
+        a.submitted = Observed<bool>::missing();
+    }
+
+    // ---- 成绩：final_score 优先，其次 score（站点逻辑：字符串才有成绩） --------
+    a.score = readNumber(obj, field::kFinalScore,
+                         QStringLiteral("exam.final_score"), issues);
+    if (!a.score.isAuthoritative()) {
+        const auto score = readNumber(obj, field::kScore, QStringLiteral("exam.score"), issues);
+        if (score.isAuthoritative()) {
+            a.score = score;
+        }
+    }
+
+    // ---- 状态推导（与作业同口径：提交 > 截止时间 > 窗口状态） ------------------
+    const auto dueHasPassed = [&a, &observedAt]() -> std::optional<bool> {
+        if (a.dueAt.state() != FieldState::Present) {
+            return std::nullopt;   // 不知道考试结束时间
+        }
+        return a.dueAt.require() < observedAt;
+    };
+    if (a.submitted.state() == FieldState::Present) {
+        if (a.submitted.require()) {
+            a.status = Observed<AssignmentStatus>::present(AssignmentStatus::Submitted);
+        } else if (const auto passed = dueHasPassed(); passed.has_value()) {
+            a.status = Observed<AssignmentStatus>::present(*passed ? AssignmentStatus::Overdue
+                                                                   : AssignmentStatus::Pending);
+        } else {
+            a.status = Observed<AssignmentStatus>::missing();
+        }
+    } else {
+        // 没有提交计数：只能按考试窗口做弱推断
+        const auto started = readBool(obj, field::kIsStarted,
+                                      QStringLiteral("exam.is_started"), issues);
+        const auto closed = readBool(obj, field::kIsClosed,
+                                     QStringLiteral("exam.is_closed"), issues);
+        if (started.state() == FieldState::Present && !started.require()) {
+            a.status = Observed<AssignmentStatus>::present(AssignmentStatus::Pending);  // 未开始
+        } else if (closed.state() == FieldState::Present) {
+            if (const auto passed = dueHasPassed(); passed.has_value()) {
+                a.status = Observed<AssignmentStatus>::present(*passed ? AssignmentStatus::Overdue
+                                                                       : AssignmentStatus::Closed);
+            } else {
+                a.status = Observed<AssignmentStatus>::present(AssignmentStatus::Closed);
+            }
+        } else {
+            a.status = Observed<AssignmentStatus>::missing();
+        }
+    }
+
+    // ---- 详情链接 [推导] ------------------------------------------------------
+    // 来源：站点前端自己的"退出考试"跳转代码
+    //   /course/{courseId}/learning-activity#/exam/{examId}
+    if (!courseId.isEmpty() && !a.activityId.isEmpty()) {
+        a.detailUrl = Observed<QString>::present(
+            QStringLiteral("https://lms.nju.edu.cn/course/%1/learning-activity#/exam/%2")
+                .arg(courseId, a.activityId));
+    } else {
+        a.detailUrl = Observed<QString>::missing();
+    }
+
+    a.contentSignature = computeContentSignature(a);
+    a.contentHash = QString::fromLatin1(
+        QCryptographicHash::hash(a.contentSignature.toUtf8(), QCryptographicHash::Sha256).toHex());
+    return a;
+}
+
+AssignmentParser::ExamListOutcome AssignmentParser::parseExamList(const QJsonObject &root,
+                                                                  const QString &courseId,
+                                                                  const QDateTime &observedAt)
+{
+    ExamListOutcome out;
+
+    const QJsonValue examsValue = root.value(field::kExams);
+    if (!examsValue.isArray()) {
+        out.issues.append(ParseIssue(QStringLiteral("exams"),
+                                     QStringLiteral("'exams' array missing from response"),
+                                     FieldState::Missing));
+        return out;   // ok 保持 false：调用方不得据此判定"这门课没有考试"
+    }
+    out.ok = true;
+
+    const QJsonArray arr = examsValue.toArray();
+    out.exams.reserve(arr.size());
+    for (const QJsonValue &v : arr) {
+        if (!v.isObject()) {
+            out.issues.append(ParseIssue(QStringLiteral("exams[]"),
+                                         QStringLiteral("array element is not an object"),
+                                         FieldState::Invalid));
+            continue;
+        }
+        Assignment exam = parseExam(courseId, v.toObject(), observedAt, &out.issues);
+        if (exam.sourceId.isEmpty()) {
+            out.issues.append(ParseIssue(QStringLiteral("exam.unique_key"),
+                                         QStringLiteral("exam without stable id skipped"),
+                                         FieldState::Invalid));
+            continue;
+        }
+        out.exams.append(exam);
+    }
     return out;
 }
 

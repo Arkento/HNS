@@ -15,7 +15,8 @@ namespace njulms {
 
 /// 数据库当前结构版本。任何表结构变更都必须递增并在 migrate() 中提供迁移分支。
 /// v3：courses 增加 source（多站点：nju-lms / chaoxing）
-constexpr int kSchemaVersion = 3;
+/// v4：assignments 增加 kind（homework / exam —— 考试接入）
+constexpr int kSchemaVersion = 4;
 
 /// 采集任务运行状态（crawl_runs.status）
 struct CrawlRun

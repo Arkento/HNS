@@ -97,6 +97,14 @@ enum class AssignmentStatus {
 const char *assignmentStatusKey(AssignmentStatus s) noexcept;
 QString assignmentStatusDisplay(AssignmentStatus s);
 
+/**
+ * 条目类型显示名：homework → 作业；exam → 考试；其它值原样返回。
+ *
+ * 类型值来自各站点自身（南大：homework / exam；学习通：作业 / 考试列表各自一个采集通道），
+ * 数据库里存文本，便于以后扩展（测验等）而不需要迁移。
+ */
+QString assignmentKindDisplay(const QString &kind);
+
 /// 从存储键还原状态；无法识别时返回 nullopt（调用方应视为解析失败而非 Unknown）
 std::optional<AssignmentStatus> assignmentStatusFromKey(const QString &key);
 
@@ -115,6 +123,9 @@ struct Assignment {
     QString courseId;   ///< 所属课程 ID（数据库外键）
     QString sourceId;   ///< 站点侧稳定标识，来自实测字段 "unique_key"，例如 "homework-43604"
     QString activityId; ///< 实测字段 "id"（整型），转为 QString；用于拼接详情链接与详情接口
+
+    /// 条目类型：homework（作业）/ exam（考试）。未知值原样保留，显示见 assignmentKindDisplay()。
+    QString kind = QStringLiteral("homework");
 
     // ---- 内容字段（三态）------------------------------------------------------
     Observed<QString> title;

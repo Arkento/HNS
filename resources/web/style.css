@@ -333,6 +333,8 @@ main {
 .chip-warn { color: var(--warning); background: var(--warning-bg); }
 /* 来源标签（南大 / 学习通）：低调的中性色，只用 accent 文字色区分站点 */
 .chip-source { color: var(--accent); background: var(--accent-soft); }
+/* 类型标签（考试）：用警示色，避免和来源标签混淆 */
+.chip-exam { color: var(--warning); background: var(--warning-bg); }
 
 .sub-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
 .sub-item {

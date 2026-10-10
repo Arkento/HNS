@@ -23,6 +23,8 @@ constexpr auto kMyCoursesPath = "/api/my-courses";
 constexpr auto kHomeworkActivitiesPath = "/api/courses/%1/homework-activities";
 /// [实测] 课程活动合集接口。⚠️ 实测响应不含任何分页元数据。
 constexpr auto kActivitiesPath = "/api/courses/%1/activities";
+/// [实测 2026-10-10] 考试列表接口（站点前端 initExamsWithPage 使用的路径与参数）
+constexpr auto kExamListPath = "/api/courses/%1/exam-list?page=%2&page_size=%3&reloadPage=false";
 /// [实测] 响应中作业数组的键名
 constexpr auto kHomeworkActivitiesKey = "homework_activities";
 /// [实测] 响应中活动数组的键名
@@ -550,6 +552,115 @@ void NjuLmsAdapter::fetchAssignmentsPage(const QString &courseId, int page,
             // 完整性仍由本接口自己的 total 权威判定。
             callback(*accumulated);
         });
+}
+
+// ---------------------------------------------------------------------------
+// fetchExams（考试接入，2026-10-10）
+// ---------------------------------------------------------------------------
+
+void NjuLmsAdapter::fetchExams(const QString &courseId,
+                               std::function<void(const ExamListResult &)> callback)
+{
+    ExamListResult result;
+    if (courseId.isEmpty()) {
+        result.error = Error::make(ErrorCode::UnexpectedShape, QStringLiteral("courseId is empty"));
+        callback(result);
+        return;
+    }
+    if (d->bridge == nullptr || !d->bridge->isReady()) {
+        result.error = Error::make(ErrorCode::Transport, QStringLiteral("page bridge is not ready"));
+        callback(result);
+        return;
+    }
+    fetchExamsPage(courseId, /*page=*/1, std::make_shared<ExamListResult>(), std::move(callback));
+}
+
+void NjuLmsAdapter::fetchExamsPage(const QString &courseId, int page,
+                                   std::shared_ptr<ExamListResult> accumulated,
+                                   std::function<void(const ExamListResult &)> callback)
+{
+    // 单次取较大 page_size（作业接口实测 10/50/200 均可接受），绝大多数课程一次即完整快照。
+    constexpr int kExamPageSize = 200;
+    // 防御：分页元数据异常时最多取 20 页，避免无限请求。
+    constexpr int kExamMaxPages = 20;
+
+    auto req = IPageBridge::Request::get(
+        QString::fromLatin1(kExamListPath).arg(courseId).arg(page).arg(kExamPageSize));
+
+    requestWithRetry(this, d->bridge, d->maxRetries, d->requestIntervalMs, req,
+                     [this, courseId, page, accumulated,
+                      callback = std::move(callback)](const IPageBridge::Response &res) mutable {
+        if (!res.transportOk) {
+            accumulated->error = Error::make(ErrorCode::Transport, res.error);
+            callback(*accumulated);
+            return;
+        }
+        if (!res.hasHttpResponse() || res.httpStatus / 100 != 2) {
+            accumulated->error = Error::make(ErrorCode::HttpStatus,
+                                             QStringLiteral("unexpected HTTP status"),
+                                             res.httpStatus);
+            callback(*accumulated);
+            return;
+        }
+
+        const ParseOutcome envelope = AssignmentParser::inspectEnvelope(res.body);
+        if (!envelope.ok()) {
+            accumulated->error = Error::make(ErrorCode::SessionExpired, envelope.detail);
+            emit sessionExpired();
+            callback(*accumulated);
+            return;
+        }
+
+        const QJsonObject root = QJsonDocument::fromJson(res.body.toUtf8()).object();
+        const AssignmentParser::ExamListOutcome parsed =
+            AssignmentParser::parseExamList(root, courseId, timeutil::nowUtc());
+
+        accumulated->issues.append(parsed.issues);
+        if (!parsed.ok) {
+            accumulated->error = Error::make(
+                ErrorCode::UnexpectedShape,
+                QStringLiteral("JSON response has no 'exams' array"));
+            callback(*accumulated);
+            return;
+        }
+
+        for (const Assignment &exam : parsed.exams) {
+            const auto duplicate = std::find_if(
+                accumulated->exams.cbegin(), accumulated->exams.cend(),
+                [&exam](const Assignment &existing) { return existing.sourceId == exam.sourceId; });
+            if (duplicate == accumulated->exams.cend()) {
+                accumulated->exams.append(exam);
+            }
+        }
+
+        if (root.contains(QString::fromLatin1(kTotalKey))) {
+            accumulated->reportedTotal = root.value(QString::fromLatin1(kTotalKey)).toInt();
+        }
+        const int pages = root.value(QString::fromLatin1(kPagesKey)).toInt(1);
+        const int merged = accumulated->exams.size();
+
+        if (accumulated->reportedTotal >= 0 && merged >= accumulated->reportedTotal) {
+            accumulated->snapshotComplete = true;
+        } else if (page >= qMax(pages, 1) || page >= kExamMaxPages) {
+            // 翻页取尽仍与 total 不符：保守处理，不声称完整
+            accumulated->snapshotComplete = (accumulated->reportedTotal >= 0
+                                             && merged == accumulated->reportedTotal);
+            if (!accumulated->snapshotComplete) {
+                qCWarning(lcAdapter) << "exam snapshot incomplete for course"
+                                     << redact::courseId(courseId) << "- merged" << merged
+                                     << "of reported total" << accumulated->reportedTotal;
+            }
+        } else {
+            fetchExamsPage(courseId, page + 1, accumulated, std::move(callback));
+            return;
+        }
+
+        qCInfo(lcAdapter) << "course" << redact::courseId(courseId) << "exams parsed:" << merged
+                          << "reported total:" << accumulated->reportedTotal
+                          << "pages fetched:" << page
+                          << "complete:" << accumulated->snapshotComplete;
+        callback(*accumulated);
+    });
 }
 
 // ---------------------------------------------------------------------------

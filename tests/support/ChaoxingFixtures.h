@@ -25,6 +25,12 @@ QString workListTemplateChanged();
 /// 权威空列表：页面明确写着「暂无作业」（解析器不应记 Missing，上层可安全软删旧数据）
 QString workListEmptyState();
 
+/// 考试列表页（两条：已完成走"查看答卷"，未完成走列表页兜底）
+QString examListTwoItems();
+
+/// 考试列表权威空状态：页面明确写着「暂无考试」
+QString examListEmptyState();
+
 } // namespace chaoxing_fixtures
 } // namespace test
 } // namespace njulms

@@ -196,6 +196,15 @@ private:
                             const NjuLmsAdapter::AssignmentListResult &result,
                             std::function<void(const NjuLmsAdapter::AssignmentListResult &)> callback);
 
+    /// 考试合并完成后的收尾：按需补全作业说明，然后写库（考试接入）
+    void continueCourseAfterExams(const QString &courseId,
+                                  const NjuLmsAdapter::AssignmentListResult &merged);
+
+    /// 把考试列表合并进作业列表（考试接入；失败时降级为快照不完整，不做软删除）
+    void mergeExamResult(const QString &courseId,
+                         NjuLmsAdapter::AssignmentListResult &merged,
+                         const NjuLmsAdapter::ExamListResult &exams);
+
     /// 课程之间的限速间隔结束后继续下一门
     void scheduleNextCourse();
 
