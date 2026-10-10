@@ -1,0 +1,33 @@
+# ---- 构建产物 ----
+/build/
+/out/
+CMakeCache.txt
+CMakeFiles/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.obj
+*.pdb
+*.ilk
+*.exe
+
+# ---- 运行数据（绝不入库）----
+/data/*.db
+/data/*.db-wal
+/data/*.db-shm
+/logs/
+
+# ---- 敏感：会话 / 凭据 ----
+/profile/
+*.cookies
+*.session
+
+# ---- 取证产物：含真实课程名、教师姓名等个人信息，禁止提交 ----
+/_probe/my_courses_full.json
+/_probe/*_result.json
+
+# ---- 其他 ----
+*.user
+.DS_Store
+Thumbs.db

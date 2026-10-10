@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- 禁缩放：maximum-scale/user-scalable 是声明，真正生效靠 CSS 的 touch-action 与
+     app.js 里的 gesturestart 拦截（iOS Safari 从 iOS 10 起会忽略 user-scalable=no）。
+     可读性由「设置 → 字号」补偿。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#17191d" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="作业采集">
+<title>智汇南雍 作业采集</title>
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<!-- __ASSET_VERSION__ 由后端在发送前替换成资源内容哈希：
+     前端一改，URL 就变，iPad 上的老缓存自然失效（不用手动清缓存） -->
+<link rel="stylesheet" href="/style.css?v=__ASSET_VERSION__">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-inner">
+    <div class="bar-title">
+      <h1>智汇南雍 作业采集</h1>
+      <p class="bar-sub">来自 PC 上的采集器</p>
+    </div>
+    <div class="bar-badges">
+      <span id="auth-badge" class="badge badge-unknown">检查中</span>
+      <span id="link-badge" class="badge badge-bad" hidden>连接中断</span>
+    </div>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="页面切换">
+    <button class="tab" type="button" role="tab" data-tab="pending" aria-selected="true">
+      未提交<span id="pending-count" class="tab-count"></span>
+    </button>
+    <button class="tab" type="button" role="tab" data-tab="submitted" aria-selected="false">
+      已提交<span id="submitted-count" class="tab-count"></span>
+    </button>
+    <button class="tab" type="button" role="tab" data-tab="settings" aria-selected="false">
+      设置
+    </button>
+  </nav>
+</header>
+
+<main>
+  <!-- ===================== 未提交 ===================== -->
+  <section id="view-pending" class="view">
+    <div class="view-head">
+      <h2>未提交的作业</h2>
+      <span id="pending-meta" class="muted">按截止时间由近到远</span>
+    </div>
+    <div id="pending-list" class="cards">
+      <p class="empty">正在读取…</p>
+    </div>
+  </section>
+
+  <!-- ===================== 已提交 ===================== -->
+  <section id="view-submitted" class="view" hidden>
+    <div class="view-head">
+      <h2>已提交的作业</h2>
+      <span id="submitted-meta" class="muted">按课程分组 · 组内按发布时间由新到旧</span>
+    </div>
+    <div id="submitted-list" class="cards">
+      <p class="empty">正在读取…</p>
+    </div>
+  </section>
+
+  <!-- ===================== 设置 ===================== -->
+  <section id="view-settings" class="view" hidden>
+    <div class="card">
+      <div class="card-head">
+        <h2>当前任务</h2>
+        <button id="sync-refresh" class="btn-plain" type="button">刷新</button>
+      </div>
+      <div class="progress-row">
+        <div class="progress"><div id="progress-fill" class="progress-fill" style="width:0%"></div></div>
+        <span id="progress-percent" class="progress-percent">0%</span>
+      </div>
+      <p id="sync-status" class="line-strong">正在读取状态…</p>
+      <dl class="facts">
+        <div><dt>最近一次</dt><dd id="last-run">尚未执行</dd></div>
+        <div><dt>下一次</dt><dd id="next-run">未启用</dd></div>
+      </dl>
+      <div class="btn-row">
+        <button id="btn-incremental" class="btn-primary" type="button">立即增量同步</button>
+        <button id="btn-full" class="btn-plain" type="button">开始全量采集</button>
+        <button id="btn-pause" class="btn-plain" type="button" hidden>暂停</button>
+        <button id="btn-resume" class="btn-plain" type="button" hidden>继续</button>
+        <button id="btn-cancel" class="btn-danger" type="button" hidden>取消</button>
+      </div>
+      <p id="blocked-note" class="note" hidden></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>同步设置</h2></div>
+      <label class="switch-row">
+        <span>
+          <span class="switch-title">启用定时同步</span>
+          <span class="switch-sub">程序运行期间每 N 分钟跑一次</span>
+        </span>
+        <input id="set-schedule-enabled" type="checkbox" role="switch">
+      </label>
+
+      <div class="field-row">
+        <label for="set-interval">周期（分钟）</label>
+        <input id="set-interval" type="number" inputmode="numeric" step="5"
+               min="15" max="1440" value="60">
+        <button id="save-interval" class="btn-plain" type="button">保存</button>
+      </div>
+      <p class="note">可填 15 ~ 1440 分钟；默认建议不低于 60 分钟。</p>
+
+      <label class="switch-row">
+        <span>
+          <span class="switch-title">快速增量</span>
+          <span class="switch-sub">先读待办判断变化，只深扫变化的课程</span>
+        </span>
+        <input id="set-quick" type="checkbox" role="switch">
+      </label>
+
+      <label class="switch-row">
+        <span>
+          <span class="switch-title">启动时自动全量扫描</span>
+          <span class="switch-sub">每次启动把全部课程完整扫一遍</span>
+        </span>
+        <input id="set-startup-scan" type="checkbox" role="switch">
+      </label>
+
+      <label class="switch-row">
+        <span>
+          <span class="switch-title">补全作业说明</span>
+          <span class="switch-sub">缺正文的作业多花 1 个请求取活动接口（只补正文）</span>
+        </span>
+        <input id="set-enrich" type="checkbox" role="switch">
+      </label>
+
+      <p id="settings-note" class="note" hidden></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>显示</h2></div>
+      <div class="field-row">
+        <span>字号</span>
+        <div class="segmented" id="font-size-group">
+          <button type="button" data-size="small">小</button>
+          <button type="button" data-size="normal">标准</button>
+          <button type="button" data-size="large">大</button>
+          <button type="button" data-size="xlarge">特大</button>
+        </div>
+      </div>
+      <p class="note">本页默认禁止缩放（防误触），看不清楚就把字号调大。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>访问令牌</h2></div>
+      <div class="field-row">
+        <input id="set-token" type="password" autocomplete="off" autocapitalize="off"
+               autocorrect="off" spellcheck="false" placeholder="在 PC 端托盘菜单「复制访问令牌」">
+        <button id="save-token" class="btn-plain" type="button">保存</button>
+      </div>
+      <p id="token-state" class="note">只读浏览不需要令牌；改设置、触发同步需要。</p>
+    </div>
+
+    <div class="card card-quiet">
+      <h2>关于</h2>
+      <p class="note" id="about-line"></p>
+      <p class="note" id="about-version"></p>
+      <p class="note">
+        点作业右上角的 <strong>↗</strong> 会在 <strong>Safari</strong> 里打开原站详情页
+        （桌面图标形式的网页 app 不能加载外部网站，只能交给系统浏览器）。
+        iPad 上第一次打开会要求登录南大统一身份认证（需要过滑块），之后 Safari 会记住会话。
+      </p>
+    </div>
+
+    <div class="card card-danger">
+      <div class="card-head"><h2>危险操作</h2></div>
+      <p class="note">
+        删除本机数据库里的课程、作业、同步断点、运行/批次记录与字段解析异常；
+        <strong>不会</strong>删除浏览器登录状态与日志文件。
+      </p>
+      <button id="btn-purge" class="btn-danger" type="button">删除全部数据（保留登录状态）</button>
+    </div>
+  </section>
+</main>
+
+<!-- 删除数据的警告窗口（自定义弹层，兼容旧版 iPadOS 的 <dialog>） -->
+<div id="purge-modal" class="modal" role="alertdialog" aria-modal="true"
+     aria-labelledby="purge-title" hidden>
+  <div class="modal-card">
+    <h2 id="purge-title" class="modal-title">确定要删除全部采集数据吗？</h2>
+    <div class="modal-body">
+      <p>将要清空本机数据库中的：</p>
+      <ul>
+        <li>课程列表</li>
+        <li>作业记录（含已软删除的历史记录）</li>
+        <li>同步断点、运行记录与批次记录</li>
+        <li>字段解析异常记录</li>
+      </ul>
+      <p><strong>不会</strong>删除：浏览器登录状态（不需要重新扫码/过滑块）、日志文件。</p>
+      <p>删除后，下一次同步会重新做一次完整采集。此操作不可撤销。</p>
+      <label class="check-row">
+        <input id="purge-ack" type="checkbox">
+        <span>我明白这会清空本地采集数据</span>
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button id="purge-cancel" class="btn-plain" type="button">取消</button>
+      <button id="purge-confirm" class="btn-danger" type="button" disabled>删除全部数据</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<footer class="foot">智汇南雍 作业采集与管理 · iPad 前端</footer>
+
+<script src="/app.js?v=__ASSET_VERSION__"></script>
+</body>
+</html>
