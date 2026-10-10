@@ -167,6 +167,7 @@
       <h2>关于</h2>
       <p class="note" id="about-line"></p>
       <p class="note" id="about-version"></p>
+      <p class="note" id="about-shell"></p>
       <p class="note">
         点作业右上角的 <strong>↗</strong> 会在 <strong>Safari</strong> 里打开原站详情页
         （桌面图标形式的网页 app 不能加载外部网站，只能交给系统浏览器）。
@@ -214,8 +215,37 @@
 
 <div id="toast" class="toast" hidden></div>
 
+<!-- 兜底提示：如果外部脚本没能加载（PC 程序没开、离线外壳又没装好），
+     至少让页面显示一句能看懂的话 + 一个重试按钮，而不是一片空白。
+     这段是内联脚本，不依赖任何外部文件。 -->
+<div id="boot-fallback" class="boot-note" hidden>
+  <h2>页面没能完整加载</h2>
+  <p id="boot-detail">页面文件没有加载成功。</p>
+  <button type="button" onclick="location.reload()">重试</button>
+  <p class="note">
+    如果一直这样：请在电脑上的程序<strong>正在运行</strong>时，用这个主屏图标打开一次本页
+    （那一次会把页面外壳装到本机，之后 PC 没开也能打开）。
+  </p>
+</div>
+
 <footer class="foot">智汇南雍 作业采集与管理 · iPad 前端</footer>
 
+<script>
+  window.__njulmsBooted = false;
+  setTimeout(function () {
+    if (window.__njulmsBooted) { return; }
+    var box = document.getElementById('boot-fallback');
+    if (!box) { return; }
+    var detail = document.getElementById('boot-detail');
+    if (detail) {
+      detail.textContent = '脚本没有加载成功（多半是 PC 上的程序没在运行，'
+        + '而本机还没装好离线外壳）。地址：' + location.origin;
+    }
+    var main = document.querySelector('main');
+    if (main) { main.hidden = true; }   // 藏掉没有意义的占位内容
+    box.hidden = false;
+  }, 8000);
+</script>
 <script src="/app.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

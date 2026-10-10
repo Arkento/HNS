@@ -559,6 +559,32 @@ main {
 
 .toast.error { background: var(--danger); color: #fff; }
 
+/* 兜底提示（脚本没加载成功时显示） */
+.boot-note {
+  margin: 2rem auto;
+  max-width: 30rem;
+  padding: 1.2rem;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  display: grid;
+  gap: 0.75rem;
+}
+
+.boot-note h2 { margin: 0; font-size: 1.05rem; color: var(--danger); }
+.boot-note button {
+  justify-self: start;
+  min-height: var(--tap);
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 .foot {
   padding: 0.5rem 1rem 1.5rem;
   text-align: center;

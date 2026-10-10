@@ -575,6 +575,25 @@ function refreshTokenState() {
     : '只读浏览不需要令牌；改设置、触发同步需要（在 PC 端托盘菜单「复制访问令牌」）。';
 }
 
+/**
+ * 在「关于」里显示离线外壳的状态。
+ *
+ * 为什么要有这一行：主屏图标（独立网页 app）可能和 Safari 是各自独立的存储，
+ * 只有在**这个上下文里**成功联网打开过一次，离线外壳才装得上。
+ * 用户一眼就能看出"到底装没装"，不用猜。
+ */
+function refreshShellState() {
+  const node = el('about-shell');
+  if (!node) {
+    return;
+  }
+  const supported = 'serviceWorker' in navigator;
+  const controlled = supported && navigator.serviceWorker.controller !== null;
+  node.textContent = controlled
+    ? '离线外壳：已生效（PC 没开机也能打开本页）'
+    : '离线外壳：未生效 —— 请在 PC 程序运行时，用这个主屏图标打开一次本页';
+}
+
 document.addEventListener('gesturestart', (event) => event.preventDefault());
 document.addEventListener('gesturechange', (event) => event.preventDefault());
 document.addEventListener('gestureend', (event) => event.preventDefault());
@@ -762,13 +781,28 @@ applyFontSize(state.fontSize);
 refreshTokenState();
 selectTab(new URLSearchParams(location.search).get('tab') || state.tab);
 
+// 脚本活过来了：撤掉 HTML 里的兜底提示（那个提示只在 app.js 加载失败时出现）
+window.__njulmsBooted = true;
+const bootFallback = el('boot-fallback');
+if (bootFallback) {
+  bootFallback.hidden = true;
+}
+
 // 注册离线外壳：让"PC 上的程序没开"时页面也能打开（显示连不上、等后端回来自动恢复）
 if ('serviceWorker' in navigator
     && (location.protocol === 'https:'
         || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
   navigator.serviceWorker.register('/service-worker.js', { updateViaCache: 'none' })
+    .then((registration) => {
+      // 每次打开都主动查一次更新：外壳修好后不用等浏览器自己想起来
+      registration.update().catch(() => {});
+      return navigator.serviceWorker.ready;
+    })
     .catch(() => { /* 注册失败不影响正常使用 */ });
+  // 外壳是否真的在接管本页（主屏图标有独立的存储，得在这个上下文里装一次）
+  navigator.serviceWorker.addEventListener('controllerchange', refreshShellState);
 }
+refreshShellState();
 
 el('about-line').textContent =
   `本页地址：${location.origin}/（仅 Tailscale 内网可见）· 只读接口 + 令牌保护的写操作`;
