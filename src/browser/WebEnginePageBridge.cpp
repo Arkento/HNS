@@ -341,6 +341,10 @@ bool WebEnginePageBridge::initialize(const QString &profileDir, QString *error)
     settings->setAttribute(QWebEngineSettings::JavascriptCanOpenWindows, true);
     // 不做任何反检测处理：本项目不隐藏自动化痕迹、不篡改 UA。
 
+    // 浏览器 HTTP 缓存上限（磁盘）：长期运行会持续攒缓存（实测两天约 80MB），
+    // 这里设 256MB 上限，超过后由 Chromium 自行淘汰；Cookie / 登录态不受影响。
+    d->profile->setHttpCacheMaximumSize(256 * 1024 * 1024);
+
     // ---- 注入 QWebChannel 客户端库 ----
     //
     // 必须在页面创建时就注入 qwebchannel.js，否则页面里没有 QWebChannel
