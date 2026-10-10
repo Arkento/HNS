@@ -349,6 +349,13 @@ QJsonObject assignmentRow(const Course &course, const Assignment &item, bool wit
     row.insert(QStringLiteral("kind"), item.kind);
     row.insert(QStringLiteral("kindLabel"), assignmentKindDisplay(item.kind));
 
+    // 临期标记：48 小时内到期（含已逾期，secsTo 为负）→ 前端把倒计时标红（用户需求）
+    bool dueUrgent = false;
+    if (item.dueAt.hasValue()) {
+        dueUrgent = timeutil::nowUtc().secsTo(item.dueAt.require()) <= 48 * 3600;
+    }
+    row.insert(QStringLiteral("dueUrgent"), dueUrgent);
+
     // 原站详情链接（前端那个「↗」按钮用）。
     // 只放行 https + 已知站点域名（南大 / 学习通）：详情链接是按站点路由
     // 推导或从页面提取的，万一哪天解析出别的域名，也不该变成前端一个
@@ -768,7 +775,17 @@ QJsonArray MainWindow::buildAssignmentsByScope(const QString &scope) const
     const bool wantPending = scope == QLatin1String("pending");
     const QList<Course> courses = d->repository->listCourses();
 
-    QVector<QPair<QDateTime, QJsonObject>> sorted;
+    // 未提交的排序键：先按"紧急程度"分层，再按截止时间由近到远（用户需求）：
+    //   0 = 已逾期（最前）→ 1 = 48 小时内临期 → 2 = 其它有截止 → 3 = 没有截止时间（最后）
+    struct SortedRow
+    {
+        int tier = 0;
+        QDateTime key;
+        QJsonObject row;
+    };
+
+    const QDateTime urgentEdge = timeutil::nowUtc().addSecs(48 * 3600);
+    QVector<SortedRow> sorted;
     for (const Course &course : courses) {
         const QList<Assignment> assignments = d->repository->listAssignments(course.courseId);
         for (const Assignment &item : assignments) {
@@ -787,37 +804,48 @@ QJsonArray MainWindow::buildAssignmentsByScope(const QString &scope) const
                 continue;
             }
 
-            QDateTime key;
+            SortedRow entry;
             if (wantPending) {
-                key = item.dueAt.hasValue() ? item.dueAt.require() : QDateTime();
+                entry.key = item.dueAt.hasValue() ? item.dueAt.require() : QDateTime();
+                if (status == AssignmentStatus::Overdue) {
+                    entry.tier = 0;
+                } else if (!entry.key.isValid()) {
+                    entry.tier = 3;
+                } else if (entry.key <= urgentEdge) {
+                    entry.tier = 1;
+                } else {
+                    entry.tier = 2;
+                }
             } else if (item.publishedAt.hasValue()) {
-                key = item.publishedAt.require();
+                entry.key = item.publishedAt.require();
             } else if (item.dueAt.hasValue()) {
-                key = item.dueAt.require();
+                entry.key = item.dueAt.require();
             }
-            sorted.append(QPair<QDateTime, QJsonObject>(
-                key, assignmentRow(course, item, /*withCourseName=*/true,
-                                   /*withDescription=*/wantPending)));
+            entry.row = assignmentRow(course, item, /*withCourseName=*/true,
+                                      /*withDescription=*/wantPending);
+            sorted.append(entry);
         }
     }
 
     std::stable_sort(sorted.begin(), sorted.end(),
-                     [wantPending](const QPair<QDateTime, QJsonObject> &lhs,
-                                   const QPair<QDateTime, QJsonObject> &rhs) {
-                         const bool lhsValid = lhs.first.isValid();
-                         const bool rhsValid = rhs.first.isValid();
+                     [wantPending](const SortedRow &lhs, const SortedRow &rhs) {
+                         if (wantPending && lhs.tier != rhs.tier) {
+                             return lhs.tier < rhs.tier;
+                         }
+                         const bool lhsValid = lhs.key.isValid();
+                         const bool rhsValid = rhs.key.isValid();
                          if (lhsValid != rhsValid) {
                              return lhsValid;
                          }
                          if (!lhsValid) {
                              return false;
                          }
-                         return wantPending ? lhs.first < rhs.first : lhs.first > rhs.first;
+                         return wantPending ? lhs.key < rhs.key : lhs.key > rhs.key;
                      });
 
     QJsonArray rows;
     for (const auto &entry : sorted) {
-        rows.append(entry.second);
+        rows.append(entry.row);
     }
     return rows;
 }

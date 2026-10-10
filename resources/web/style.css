@@ -22,6 +22,8 @@
   --warning-bg: #fff6e0;
   --danger: #b42318;
   --danger-soft: #fdecea;
+  --purple: #6d28d9;
+  --purple-soft: #f1e9fe;
   --radius-card: 0.75rem;
   --radius-control: 0.625rem;
   --tap: 2.75rem;          /* ≥44px */
@@ -45,6 +47,8 @@
     --warning-bg: #2a2413;
     --danger: #ff7b72;
     --danger-soft: #2d1a19;
+    --purple: #c4b5fd;
+    --purple-soft: #2b2340;
   }
 }
 
@@ -333,8 +337,23 @@ main {
 .chip-warn { color: var(--warning); background: var(--warning-bg); }
 /* 来源标签（南大 / 学习通）：低调的中性色，只用 accent 文字色区分站点 */
 .chip-source { color: var(--accent); background: var(--accent-soft); }
-/* 类型标签（考试）：用警示色，避免和来源标签混淆 */
-.chip-exam { color: var(--warning); background: var(--warning-bg); }
+
+/* 类型胶囊标签：放每张卡片最前端；作业绿 / 考试紫 / 其它中性灰（用户指定） */
+.tag {
+  flex-shrink: 0;
+  padding: 0.16rem 0.62rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.tag-homework { color: var(--success); background: var(--success-soft); }
+.tag-exam { color: var(--purple); background: var(--purple-soft); }
+.tag-other { color: var(--muted); background: var(--surface-alt); }
+
+/* 未提交的倒计时：临期 48 小时内 / 已逾期 → 红色高亮（用户指定） */
+.countdown.urgent { color: var(--danger); font-weight: 700; }
 
 .sub-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
 .sub-item {
@@ -348,7 +367,7 @@ main {
   background: var(--surface-alt);
 }
 
-.sub-main { display: grid; gap: 0.15rem; min-width: 0; }
+.sub-main { display: grid; gap: 0.15rem; min-width: 0; flex: 1; }
 
 .sub-jump {
   width: 2.4rem;

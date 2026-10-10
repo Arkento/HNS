@@ -271,11 +271,21 @@ function pendingKey(row) {
   return `${row.courseId}/${row.sourceId}`;
 }
 
+/// 类型胶囊标签（放每张卡片最前端）：作业绿 / 考试紫 / 其它中性灰
+const KIND_TAG_CLASS = { homework: 'tag-homework', exam: 'tag-exam' };
+
+function kindTag(row) {
+  const label = row.kindLabel || row.kind || '作业';
+  const cls = KIND_TAG_CLASS[row.kind] || 'tag-other';
+  return `<span class="tag ${cls}">${escapeHtml(label)}</span>`;
+}
+
 function renderPending() {
   const container = el('pending-list');
   const count = state.pending.length;
   el('pending-count').textContent = count ? String(count) : '';
-  el('pending-meta').textContent = count ? `按截止时间由近到远 · ${count} 条` : '';
+  el('pending-meta').textContent =
+    count ? `临期（48 小时内）与已逾期优先 · 按截止时间由近到远 · ${count} 条` : '';
 
   if (!count) {
     container.innerHTML = '<p class="empty">没有未提交的作业。<br>数据来自 PC 端最近一次采集。</p>';
@@ -286,6 +296,10 @@ function renderPending() {
     const key = pendingKey(row);
     const open = state.openPending.has(key);
     const overdue = row.status === '已逾期';
+    // 倒计时（剩余时间）：临期 ≤48 小时或已逾期时标红（后端 dueUrgent 已按 UTC 精确判断）
+    const countdown = row.dueRelative
+      ? ` · <span class="countdown${row.dueUrgent ? ' urgent' : ''}">${escapeHtml(row.dueRelative)}</span>`
+      : '';
     const description = row.descriptionText
       ? `<p class="description">${escapeHtml(row.descriptionText)}${
           row.descriptionTruncated ? '\n（内容过长，已截断）' : ''}</p>`
@@ -298,15 +312,13 @@ function renderPending() {
       <article class="item${open ? ' open' : ''}" data-key="${escapeHtml(key)}">
         <div class="item-head">
           <button class="item-toggle" type="button" aria-expanded="${open}">
+            ${kindTag(row)}
             <span class="item-main">
               <span class="item-title">${escapeHtml(row.title)}</span>
-              <span class="item-meta">截止 ${escapeHtml(row.dueAt || '未知')}${
-                row.dueRelative ? ' · ' + escapeHtml(row.dueRelative) : ''}</span>
+              <span class="item-meta">截止 ${escapeHtml(row.dueAt || '未知')}${countdown}</span>
               <span class="item-meta">${escapeHtml(row.courseName || '')}</span>
             </span>
             <span class="item-side">
-              ${row.kind && row.kind !== 'homework'
-                ? `<span class="chip chip-exam">${escapeHtml(row.kindLabel || row.kind)}</span>` : ''}
               ${row.sourceLabel
                 ? `<span class="chip chip-source">${escapeHtml(row.sourceLabel)}</span>` : ''}
               ${overdue ? '<span class="chip chip-bad">已逾期</span>' : ''}
@@ -366,11 +378,10 @@ function renderSubmitted() {
     const open = state.openCourses.has(group.id);
     const items = group.rows.map((row) => `
       <li class="sub-item">
+        ${kindTag(row)}
         <span class="sub-main">
           <span class="sub-title">${escapeHtml(row.title)}</span>
           <span class="sub-meta">
-            ${row.kind && row.kind !== 'homework'
-              ? `<span>${escapeHtml(row.kindLabel || row.kind)}</span>` : ''}
             <span>截止 ${escapeHtml(row.dueAt || '未知')}</span>
             <span>发布 ${escapeHtml(row.publishedAt || '未知')}</span>
             <span>得分 ${escapeHtml(row.score)}</span>
