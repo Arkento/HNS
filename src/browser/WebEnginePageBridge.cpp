@@ -31,6 +31,19 @@ constexpr auto kOrigin = "https://lms.nju.edu.cn";
 constexpr auto kHomeUrl = "https://lms.nju.edu.cn/user/index#/";
 
 /**
+ * 首页地址。默认是智汇南雍；设置环境变量 NJULMS_HOME_URL 可以换成别的站点。
+ *
+ * 用途：接入新站点前先做"真机探测"——把它当首页打开、人工登录一次，
+ * 再用远程调试抓真实接口（cookie 会留在同一个持久化 Profile 里）。
+ * 只影响 loadHome()，站点相对路径（loadPath）仍以南大 LMS 为基准，行为不变。
+ */
+QString homeUrl()
+{
+    const QByteArray override = qgetenv("NJULMS_HOME_URL");
+    return override.isEmpty() ? QString::fromLatin1(kHomeUrl) : QString::fromLocal8Bit(override);
+}
+
+/**
  * 进程级的 Profile 缓存：同一个存储路径只允许一个 QWebEngineProfile。
  *
  * ⚠️ 这是实测踩到的硬约束，不是优化：
@@ -385,7 +398,7 @@ void WebEnginePageBridge::loadPath(const QString &path)
     if (d->page == nullptr) {
         return;
     }
-    const QUrl url = path.isEmpty() ? QUrl(QString::fromLatin1(kHomeUrl))
+    const QUrl url = path.isEmpty() ? QUrl(homeUrl())
                                     : QUrl(QString::fromLatin1(kOrigin) + path);
     qCInfo(lcBrowser) << "navigating to" << redact::url(url);
     d->page->setUrl(url);
