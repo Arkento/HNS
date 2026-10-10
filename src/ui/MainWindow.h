@@ -131,6 +131,12 @@ private:
     /// 隐藏学习通登录窗口（采集成功说明会话有效）
     void hideChaoxingLoginWindow();
 
+    /// 「检查学习通登录」：只取课程列表判断会话，不写采集数据
+    void checkChaoxingSession();
+
+    /// 当前库里 present 的学习通课程数（登录状态文案用）
+    int countChaoxingPresentCourses() const;
+
     /// 读取界面上的定时周期设置
     int configuredIntervalMinutes() const;
 

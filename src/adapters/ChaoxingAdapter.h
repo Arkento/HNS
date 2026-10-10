@@ -97,6 +97,9 @@ public:
     /// 供登录窗口显示（未登录时用户需要看到二维码页面）
     QWebEnginePage *page() const;
 
+    /// 打开学习通首页（供"打开学习通并登录"按钮使用；任务进行中时忽略）
+    void openLoginPage();
+
     bool isBusy() const;
 
     /// 获取课程列表（回调在主线程被调用；同一时刻只允许一个任务）

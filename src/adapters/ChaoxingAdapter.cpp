@@ -3,6 +3,7 @@
 #include "parser/ChaoxingParser.h"
 #include "utils/TimeUtils.h"
 
+#include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
@@ -39,8 +40,16 @@ constexpr int kHomeStageTimeoutMs = 45000;
  * 实测课程列表与作业列表都会在导航完成后由页面 JS 再渲染一步，
  * loadFinished 立刻读 DOM 会拿到骨架（这正是首轮真机验证失败的形态）。
  */
-constexpr int kIframePollIntervalMs = 400;
-constexpr int kContentPollAttempts = 50;   // ≈20 秒
+constexpr int kIframePollIntervalMs = 250;
+constexpr int kContentPollAttempts = 80;   // ≈20 秒（间隔缩到 250ms 后保持同样的等待窗口）
+
+/**
+ * 「找作业入口」的窗口 ≈4 秒（16 轮）。
+ * 实测课程页的「作业」入口都在 2.5 秒内渲染出来；4 秒里（含 4 次点击机会）
+ * 基本可以认定这门课没有作业入口（新版 AI 布局 / 考试专用课），早点跳过，
+ * 不必白等 20 秒。拿到入口之后等待列表地址的窗口仍然是 20 秒。
+ */
+constexpr int kEntrySearchTicks = 16;
 
 // ⚠️ 以下脚本含中文字面量（如课程页标签文本「作业」）。源文件是 UTF-8，
 // 因此注入时必须用 QString::fromUtf8() 转换；用 fromLatin1 会把中文字节
@@ -193,6 +202,19 @@ public:
         currentCourse = course;
         workTabClicked = false;
         workCb = std::move(callback);
+
+        // 会话内缓存：同一门课的作业列表地址（enc 由页面生成、同一门课在同一会话里稳定）。
+        // 直接复用可以跳过"课程页 + 点击 + 等 iframe"这三步（实测这三步是慢的部分），
+        // 把重复同步从每门课 ~3 秒降到 ~1 秒。地址失效时自动回退到完整流程并刷新缓存。
+        if (workUrlCache.contains(course.courseId)) {
+            workByCachedUrl = true;
+            triedCacheFallback = false;
+            q->stageMessage(
+                QStringLiteral("学习通：正在读取「%1」的作业列表…").arg(course.courseName));
+            navigate(workUrlCache.value(course.courseId), Stage::WorkList);
+            return;
+        }
+        workByCachedUrl = false;
         q->stageMessage(QStringLiteral("学习通：正在打开课程「%1」…").arg(course.courseName));
         navigate(course.detailUrl, Stage::CoursePage);
     }
@@ -272,6 +294,8 @@ private:
 
     void sessionExpired()
     {
+        // 会话失效后页面生成的 enc 地址全部作废
+        workUrlCache.clear();
         const QString message = QStringLiteral("需要登录学习通（请扫码）");
         emit q->loginRequired(message);
         fail(ErrorCode::SessionExpired, message);
@@ -388,7 +412,7 @@ private:
                 q->stageMessage(QStringLiteral("学习通：正在打开课程中心…"));
                 navigate(QString::fromLatin1(kCourseCenterPrefix) + token, Stage::CourseCenter);
             });
-        }, 90);
+        }, 140);   // ≈35 秒（间隔 250ms）
     }
 
     void afterCourseCenter()
@@ -447,9 +471,17 @@ private:
                 onWorkTabTimeout();
                 return;
             }
-            // 入口刚出现时点击可能是空操作（事件尚未绑定），因此未拿到列表地址前
-            // 每 5 轮（约 2 秒）点一次；拿到地址立即停止（最多 10 次点击）。
-            if (pollAttempts % 5 == 1) {
+            // 3 秒内找不到「作业」入口 → 判定该课程没有作业入口（快速跳过）
+            if (!workTabClicked && pollAttempts > kEntrySearchTicks) {
+                stopPolling();
+                onWorkTabTimeout();
+                return;
+            }
+            // 入口刚出现时点击可能是空操作（事件尚未绑定），因此未拿到列表地址前：
+            // 前 6 秒每秒点一次，之后每 4 秒补一次（总计最多约 10 次，拿到地址立即停止）。
+            const bool clickFast = pollAttempts <= 24 && pollAttempts % 4 == 1;
+            const bool clickSlow = pollAttempts % 16 == 1;
+            if (clickFast || clickSlow) {
                 runJs(QString::fromUtf8(kClickWorkTabScript), [this](const QVariant &value) {
                     if (value.toString() == QLatin1String("clicked")) {
                         workTabClicked = true;
@@ -554,6 +586,26 @@ private:
                     }
                     result.snapshotComplete = !morePages && !worklistUnreadable;
 
+                    // 缓存命中却读不出内容（例如地址过期返回"无权限的操作"）：
+                    // 清掉这一条并回退到完整流程（课程页 → 点击 → 捕获新地址），
+                    // 只回退一次，避免在真正改版时来回打转。
+                    if (workByCachedUrl && worklistUnreadable) {
+                        workUrlCache.remove(currentCourse.courseId);
+                        if (!triedCacheFallback) {
+                            triedCacheFallback = true;
+                            workByCachedUrl = false;
+                            workTabClicked = false;
+                            qCDebug(lcChaoxing) << "cached work list url invalid; full flow fallback";
+                            navigate(currentCourse.detailUrl, Stage::CoursePage);
+                            return;   // 本次回调继续挂起，走完整流程后再交付结果
+                        }
+                    }
+                    // 完整流程成功：记住这门课的列表地址，供本轮之后（含下一次同步）复用
+                    if (!workByCachedUrl && !worklistUnreadable && !morePages
+                        && page->url().isValid()) {
+                        workUrlCache.insert(currentCourse.courseId, page->url().toString());
+                    }
+
                     auto cb = workCb;
                     end();
                     if (cb) {
@@ -579,6 +631,12 @@ private:
     bool expectingLoad = false;
     /// 本门课程的「作业」入口是否已经点过（点击也要等页面渲染出来）
     bool workTabClicked = false;
+    /// 会话内的作业列表地址缓存：courseId → work/list URL（见 startWork 的说明）
+    QHash<QString, QString> workUrlCache;
+    /// 本次取数是否走的缓存地址（决定失败时要不要回退完整流程）
+    bool workByCachedUrl = false;
+    /// 本次取数是否已经因缓存失效回退过一次（防止来回打转）
+    bool triedCacheFallback = false;
     quint64 generation = 0;
 
     Course currentCourse;
@@ -600,6 +658,14 @@ ChaoxingAdapter::~ChaoxingAdapter() = default;
 QWebEnginePage *ChaoxingAdapter::page() const
 {
     return d->page;
+}
+
+void ChaoxingAdapter::openLoginPage()
+{
+    if (d->busy) {
+        return;   // 任务进行中：不要打断状态机
+    }
+    d->page->load(QUrl(QString::fromLatin1(kHomeUrl)));
 }
 
 bool ChaoxingAdapter::isBusy() const

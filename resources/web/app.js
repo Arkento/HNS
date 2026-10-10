@@ -223,7 +223,6 @@ function renderSettings(data) {
   setCheckedIf('set-quick', settings.quickIncremental);
   setCheckedIf('set-startup-scan', settings.startupFullScan);
   setCheckedIf('set-enrich', settings.enrichDescriptions);
-  setCheckedIf('set-chaoxing', settings.chaoxingEnabled);
 
   const interval = el('set-interval');
   if (document.activeElement !== interval && typeof settings.scheduleIntervalMinutes === 'number') {
@@ -674,7 +673,7 @@ el('btn-incremental').addEventListener('click', async () => {
 el('btn-full').addEventListener('click', async () => {
   await writeAction('/api/sync', { mode: 'full' }, '已开始全量采集',
                     '全量采集会把所有课程完整扫一遍（南大十几门课约 10 秒；' +
-                    '若开启了学习通，还会逐门取作业列表，多花一两分钟），确定开始吗？');
+                    '学习通随后逐门取作业列表，多花一两分钟），确定开始吗？');
   tick(true);
 });
 
@@ -701,7 +700,6 @@ for (const [id, key] of [
   ['set-quick', 'quickIncremental'],
   ['set-startup-scan', 'startupFullScan'],
   ['set-enrich', 'enrichDescriptions'],
-  ['set-chaoxing', 'chaoxingEnabled'],
 ]) {
   el(id).addEventListener('change', async (event) => {
     const value = event.target.checked;
