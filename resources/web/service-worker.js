@@ -96,6 +96,16 @@ self.addEventListener('fetch', (event) => {
         } else if (isAsset(url)) {
           cache.put(request, response.clone());
         }
+        return response;
+      }
+
+      // 关键：后端没开时，Tailscale 的代理**不是**返回网络错误，而是返回 502 空响应。
+      // 如果直接把这个 5xx 交给浏览器，用户看到的就是一片空白（实测踩过）。
+      // 所以非 2xx 一律先看缓存里有没有可用的旧副本。
+      const cached = (request.mode === 'navigate' ? await cache.match('/') : null)
+                     || await cache.match(request);
+      if (cached && response.status >= 500) {
+        return cached;
       }
       return response;
     } catch (error) {

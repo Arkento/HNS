@@ -82,7 +82,11 @@ async function api(path, options = {}) {
 
   const payload = await response.json().catch(() => null);
   if (!response.ok || !payload || payload.ok !== true) {
-    const message = payload && payload.error ? payload.error.message : `HTTP ${response.status}`;
+    let message = payload && payload.error ? payload.error.message : `HTTP ${response.status}`;
+    if (!payload && response.status >= 500) {
+      // PC 上的程序没运行时，Tailscale 的代理会回 502/503 —— 对用户来说就是"程序没开"
+      message = 'PC 上的程序没有运行';
+    }
     throw new ApiError(message, response.status);
   }
   return payload.data;
