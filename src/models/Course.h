@@ -5,10 +5,29 @@
 #include <QDateTime>
 #include <QString>
 #include <QStringList>
+#include <QStringView>
 
 #include <optional>
 
 namespace njulms {
+
+/**
+ * 已知的数据来源键（写进 Course::source / courses.source）。
+ *
+ * 用途有两个：
+ *   1. 课程快照的软删除**按来源隔离**——写学习通的快照绝不能把智汇南雍的课程
+ *      标记为 present=0，反之亦然；
+ *   2. 前端卡片上的"来源标签"直接使用这里的键。
+ *
+ * 用 constexpr QStringView 而不是 QString：避免头文件里的全局对象初始化顺序问题，
+ * 调用点用 .toString() 显式转换，成本可忽略。
+ */
+namespace source_keys {
+
+constexpr QStringView kNjuLms = u"nju-lms";      ///< 智汇南雍（南京大学 LMS）
+constexpr QStringView kChaoxing = u"chaoxing";   ///< 学习通（超星）
+
+} // namespace source_keys
 
 /**
  * 课程。字段来源：POST /api/my-courses（实测 2026-10-09）。
@@ -18,6 +37,10 @@ namespace njulms {
  * **不含** created_at / updated_at，因此本结构没有这两个字段。
  */
 struct Course {
+    /// 数据来源（多站点支持）：`nju-lms`（智汇南雍）/ `chaoxing`（学习通）。
+    /// 作业与课程的"来源标签"、以及快照的软删除范围都以它为准。
+    QString source;
+
     /// 站点侧课程 ID（实测 JSON 字段 "id"，整型）。作为主键，转为 QString 存储。
     QString courseId;
     QString courseName;

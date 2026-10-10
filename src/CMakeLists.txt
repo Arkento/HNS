@@ -13,6 +13,8 @@ add_library(njulms_core STATIC
 
     parser/AssignmentParser.cpp
     parser/AssignmentParser.h
+    parser/ChaoxingParser.cpp
+    parser/ChaoxingParser.h
 
     repository/SqliteRepository.cpp
     repository/SqliteRepository.h

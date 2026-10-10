@@ -13,8 +13,10 @@ target_include_directories(njulms_test_support INTERFACE ${CMAKE_CURRENT_SOURCE_
 target_link_libraries(njulms_test_support INTERFACE njulms_core)
 
 # 辅助函数：注册一个基于 Qt Test 的测试可执行文件
+# 额外参数（可选）：该测试专属的支撑源文件（例如含多行 HTML 样本的夹具 .cpp，
+# 它们必须放在不被 moc 处理的 .cpp 里，见 docs/01-实现决策.md）
 function(njulms_add_test name)
-    add_executable(${name} ${name}.cpp)
+    add_executable(${name} ${name}.cpp ${ARGN})
     target_link_libraries(${name}
         PRIVATE
             njulms_test_support
@@ -34,6 +36,7 @@ function(njulms_add_test name)
 endfunction()
 
 njulms_add_test(AssignmentParserTests)
+njulms_add_test(ChaoxingParserTests support/ChaoxingFixtures.cpp)
 njulms_add_test(AuthManagerTests)
 njulms_add_test(PaginationTests)
 njulms_add_test(RepositoryTests)

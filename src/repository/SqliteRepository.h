@@ -14,7 +14,8 @@
 namespace njulms {
 
 /// 数据库当前结构版本。任何表结构变更都必须递增并在 migrate() 中提供迁移分支。
-constexpr int kSchemaVersion = 2;
+/// v3：courses 增加 source（多站点：nju-lms / chaoxing）
+constexpr int kSchemaVersion = 3;
 
 /// 采集任务运行状态（crawl_runs.status）
 struct CrawlRun
@@ -140,8 +141,14 @@ public:
      * 快照语义：本次快照中**没有**出现的课程会被标记 present=0（软删除），
      * 而不是物理删除——课程可能只是本学期未开放，历史作业数据仍应保留
      * （需求场景 G：课程列表变化时必须重新发现，不能永久依赖首次列表）。
+     *
+     * ⚠️ `source` 必须给出：软删除（present=0）**只在同一个来源内生效**——
+     * 否则写学习通的快照会把智汇南雍的课程全部标记为消失。
+     * 参数同时是整批课程的唯一来源：写入行的 source 与软删除范围都由它决定；
+     * 若某门课自带 source 且与参数不一致，快照整体失败（宁可失败也不能错删）。
      */
-    bool applyCourseSnapshot(const QList<Course> &courses, QString *error = nullptr);
+    bool applyCourseSnapshot(const QString &source, const QList<Course> &courses,
+                             QString *error = nullptr);
 
     QList<Course> listCourses(bool includeMissing = false) const;
 

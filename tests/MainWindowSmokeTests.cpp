@@ -48,13 +48,14 @@ private:
         QVERIFY2(repo.open(path, &error), qPrintable(error));
 
         Course c;
+        c.source = source_keys::kNjuLms.toString();
         c.courseId = QStringLiteral("90001");
         c.courseName = QStringLiteral("冒烟测试课程");
         c.detailUrl = QStringLiteral("https://lms.nju.edu.cn/course/90001/index");
         c.courseCode = QStringLiteral("SMOKE001");
         c.instructors = {QStringLiteral("测试教师")};
         c.lastSeenAt = QDateTime::currentDateTimeUtc();
-        QVERIFY(repo.applyCourseSnapshot({c}, &error));
+        QVERIFY(repo.applyCourseSnapshot(source_keys::kNjuLms.toString(), {c}, &error));
 
         QList<Assignment> items;
         for (int i = 0; i < 3; ++i) {

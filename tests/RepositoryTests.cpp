@@ -72,7 +72,8 @@ private slots:
         // 表名/列名的正确性由 open() 内的建表语句与后续 CRUD 共同保证。
         const QList<Course> courses = coursesFrom(fixtures::myCoursesTwoCourses());
         QString error;
-        QVERIFY2(repo->applyCourseSnapshot(courses, &error), qPrintable(error));
+        QVERIFY2(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(), courses, &error),
+                 qPrintable(error));
         QCOMPARE(repo->listCourses().size(), 2);
 
         const QString courseId = QStringLiteral("90001");
@@ -117,7 +118,8 @@ private slots:
     void courses_firstSnapshotInserts()
     {
         auto repo = openRepo(QStringLiteral("_courses1"));
-        QVERIFY(repo->applyCourseSnapshot(coursesFrom(fixtures::myCoursesTwoCourses())));
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(),
+                                          coursesFrom(fixtures::myCoursesTwoCourses())));
         QCOMPARE(repo->listCourses().size(), 2);
         QCOMPARE(repo->listCourses(true).size(), 2);
     }
@@ -125,7 +127,8 @@ private slots:
     void courses_removedCourseIsSoftDeletedNotErased()
     {
         auto repo = openRepo(QStringLiteral("_courses2"));
-        QVERIFY(repo->applyCourseSnapshot(coursesFrom(fixtures::myCoursesTwoCourses())));
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(),
+                                          coursesFrom(fixtures::myCoursesTwoCourses())));
 
         // 第二次快照只剩一门课 → 另一门应被标记 present=0，但数据保留。
         //
@@ -140,14 +143,48 @@ private slots:
         only.detailUrl = QStringLiteral("https://lms.nju.edu.cn/course/90001/index");
         only.lastSeenAt = fixtures::observedBeforeDeadlines();
 
-        QVERIFY(repo->applyCourseSnapshot({only}));
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(), {only}));
 
         QCOMPARE(repo->listCourses(false).size(), 1);
         QCOMPARE(repo->listCourses(true).size(), 2);
 
         // 场景 G：课程列表变化时下一次同步必须重新发现，不能永久依赖首次列表
-        QVERIFY(repo->applyCourseSnapshot(coursesFrom(fixtures::myCoursesTwoCourses())));
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(),
+                                          coursesFrom(fixtures::myCoursesTwoCourses())));
         QCOMPARE(repo->listCourses(false).size(), 2);
+    }
+
+    /// 多站点：一个来源的快照绝不能软删除另一个来源的课程
+    void courses_snapshotsAreIsolatedPerSource()
+    {
+        auto repo = openRepo(QStringLiteral("_courses_src"));
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(),
+                                          coursesFrom(fixtures::myCoursesTwoCourses())));
+
+        Course cx;
+        cx.source = source_keys::kChaoxing.toString();
+        cx.courseId = QStringLiteral("111111111-222222222");
+        cx.courseName = QStringLiteral("学习通测试课程");
+        cx.lastSeenAt = fixtures::observedBeforeDeadlines();
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kChaoxing.toString(), {cx}));
+        QCOMPARE(repo->listCourses().size(), 3);
+
+        // 快照参数与课程自带来源不一致 → 整体失败（防止把学习通课程写进南大的范围）
+        QString mismatchError;
+        QVERIFY(!repo->applyCourseSnapshot(source_keys::kNjuLms.toString(), {cx},
+                                           &mismatchError));
+        QVERIFY(!mismatchError.isEmpty());
+        QCOMPARE(repo->listCourses(true).size(), 3);   // 事务回滚，没有半成品数据
+
+        // 学习通第二次快照为空（例如课程全部结课消失）→ 只影响学习通自己
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kChaoxing.toString(), {}));
+        const QList<Course> remaining = repo->listCourses();
+        QCOMPARE(remaining.size(), 2);
+        for (const Course &c : remaining) {
+            QCOMPARE(c.source, source_keys::kNjuLms.toString());
+        }
+        // 软删除保留历史：包括被软删的学习通课程
+        QCOMPARE(repo->listCourses(true).size(), 3);
     }
 
     // ---- 作业：重复采集不产生重复记录 --------------------------------------
@@ -626,8 +663,8 @@ private slots:
         QCOMPARE(repo->listRecentRuns(100).size(), 2);
     }
 
-    /// v1 结构（courses 缺 v2 两列）必须能就地迁移
-    void schema_migratesV1DatabaseToV2()
+    /// v1 结构（courses 缺 v2/v3 各列）必须能就地迁移到当前版本
+    void schema_migratesV1DatabaseToCurrent()
     {
         const QString path = QDir(m_dir.path()).filePath(QStringLiteral("legacy.db"));
         const QString setup = QStringLiteral("legacy_setup");
@@ -656,6 +693,8 @@ private slots:
         QString error;
         QVERIFY2(repo.open(path, &error), qPrintable(error));
         QCOMPARE(repo.listCourses(true).size(), 1);
+        // 迁移时 source 回填默认值：历史数据视为智汇南雍
+        QCOMPARE(repo.listCourses(true).first().source, QStringLiteral("nju-lms"));
 
         // 迁移成功的判据：写入快照时会更新 courses.last_synced_at / assignment_count
         const QList<Assignment> three =
@@ -674,7 +713,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec(QStringLiteral("SELECT MAX(version) FROM schema_version")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 2);
+            QCOMPARE(q.value(0).toInt(), 3);
             QVERIFY(q.exec(QStringLiteral("PRAGMA table_info(courses)")));
             QStringList columns;
             while (q.next()) {
@@ -682,6 +721,7 @@ private slots:
             }
             QVERIFY(columns.contains(QStringLiteral("last_synced_at")));
             QVERIFY(columns.contains(QStringLiteral("assignment_count")));
+            QVERIFY(columns.contains(QStringLiteral("source")));
             db.close();
         }
         QSqlDatabase::removeDatabase(check);
@@ -692,7 +732,7 @@ private slots:
     {
         auto repo = openRepo(QStringLiteral("_clear"));
         const QList<Course> courses = coursesFrom(fixtures::myCoursesTwoCourses());
-        QVERIFY(repo->applyCourseSnapshot(courses));
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(), courses));
 
         const QList<Assignment> three =
             assignmentsFrom(fixtures::homeworkActivitiesThree(), QStringLiteral("90001"));
@@ -733,7 +773,7 @@ private slots:
         QCOMPARE(repo->listRecentParseErrors().size(), 0);
 
         // 结构没变：清空后可以继续正常写入
-        QVERIFY(repo->applyCourseSnapshot(courses));
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(), courses));
         QCOMPARE(repo->listCourses().size(), 2);
     }
 };

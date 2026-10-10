@@ -47,6 +47,7 @@ QStringList schemaStatements()
             "  course_code   TEXT,"
             "  department    TEXT,"
             "  instructors   TEXT,"
+            "  source        TEXT NOT NULL DEFAULT 'nju-lms',"
             "  semester_code TEXT,"
             "  year_code     TEXT,"
             "  present       INTEGER NOT NULL DEFAULT 1,"
@@ -306,6 +307,14 @@ bool SqliteRepository::Impl::migrateSchema(int fromVersion)
                        QStringLiteral("TEXT")) ||
             !addColumn(QStringLiteral("courses"), QStringLiteral("assignment_count"),
                        QStringLiteral("INTEGER"))) {
+            return false;
+        }
+    }
+
+    if (fromVersion < 3) {
+        // v3：多站点支持——课程带上来源；历史数据默认视为智汇南雍。
+        if (!addColumn(QStringLiteral("courses"), QStringLiteral("source"),
+                       QStringLiteral("TEXT NOT NULL DEFAULT 'nju-lms'"))) {
             return false;
         }
     }
@@ -608,7 +617,8 @@ private:
 // 课程
 // ---------------------------------------------------------------------------
 
-bool SqliteRepository::applyCourseSnapshot(const QList<Course> &courses, QString *error)
+bool SqliteRepository::applyCourseSnapshot(const QString &source, const QList<Course> &courses,
+                                           QString *error)
 {
     TransactionGuard tx(*this);
     if (!tx.active()) {
@@ -618,19 +628,25 @@ bool SqliteRepository::applyCourseSnapshot(const QList<Course> &courses, QString
         return false;
     }
 
-    const QString now = timeutil::toStorage(timeutil::nowUtc());
+    if (source.isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("course snapshot requires a non-empty source");
+        }
+        return false;   // 没有来源就无法安全地做"范围内的软删除"
+    }
 
     QSqlQuery upsert(d->db);
     upsert.prepare(QStringLiteral(
         "INSERT INTO courses (course_id, course_name, detail_url, course_code, department,"
-        "                     instructors, semester_code, year_code, present, last_seen_at)"
-        " VALUES (:id, :name, :url, :code, :dept, :teachers, :sem, :year, 1, :seen)"
+        "                     instructors, source, semester_code, year_code, present, last_seen_at)"
+        " VALUES (:id, :name, :url, :code, :dept, :teachers, :source, :sem, :year, 1, :seen)"
         " ON CONFLICT(course_id) DO UPDATE SET"
         "   course_name   = excluded.course_name,"
         "   detail_url    = excluded.detail_url,"
         "   course_code   = excluded.course_code,"
         "   department    = excluded.department,"
         "   instructors   = excluded.instructors,"
+        "   source        = excluded.source,"
         "   semester_code = excluded.semester_code,"
         "   year_code     = excluded.year_code,"
         "   present       = 1,"
@@ -640,6 +656,15 @@ bool SqliteRepository::applyCourseSnapshot(const QList<Course> &courses, QString
         if (c.courseId.isEmpty()) {
             continue;
         }
+        // 整批课程必须属于同一个来源：写入行的 source 与软删除范围都由参数决定。
+        // 不一致说明调用方传错了来源——静默写下去会让另一来源的课程被错删，直接失败。
+        if (!c.source.isEmpty() && c.source != source) {
+            if (error != nullptr) {
+                *error = QStringLiteral("course '%1' has source '%2' but snapshot source is '%3'")
+                             .arg(c.courseId, c.source, source);
+            }
+            return false;
+        }
         upsert.bindValue(QStringLiteral(":id"), c.courseId);
         upsert.bindValue(QStringLiteral(":name"), c.courseName);
         upsert.bindValue(QStringLiteral(":url"), c.detailUrl);
@@ -647,6 +672,7 @@ bool SqliteRepository::applyCourseSnapshot(const QList<Course> &courses, QString
         upsert.bindValue(QStringLiteral(":dept"),
                          c.department.has_value() ? QVariant(*c.department) : QVariant());
         upsert.bindValue(QStringLiteral(":teachers"), joinList(c.instructors));
+        upsert.bindValue(QStringLiteral(":source"), source);
         upsert.bindValue(QStringLiteral(":sem"),
                          c.semesterCode.has_value() ? QVariant(*c.semesterCode) : QVariant());
         upsert.bindValue(QStringLiteral(":year"),
@@ -663,10 +689,13 @@ bool SqliteRepository::applyCourseSnapshot(const QList<Course> &courses, QString
 
     // 本次快照未出现的课程标记为 present=0（软删除，保留历史作业）。
     // 需求场景 G：不能永久依赖首次采集得到的课程列表。
+    // ⚠️ 只在**同一来源**内软删除：写学习通的快照不能影响智汇南雍的课程。
     {
         QSqlQuery mark(d->db);
         if (courses.isEmpty()) {
-            mark.prepare(QStringLiteral("UPDATE courses SET present = 0 WHERE present = 1"));
+            mark.prepare(QStringLiteral("UPDATE courses SET present = 0"
+                                        " WHERE present = 1 AND source = :source"));
+            mark.bindValue(QStringLiteral(":source"), source);
         } else {
             QStringList placeholders;
             placeholders.reserve(courses.size());
@@ -674,8 +703,9 @@ bool SqliteRepository::applyCourseSnapshot(const QList<Course> &courses, QString
                 placeholders << QStringLiteral(":id%1").arg(i);
             }
             mark.prepare(QStringLiteral("UPDATE courses SET present = 0 WHERE present = 1"
-                                        " AND course_id NOT IN (%1)")
+                                        " AND source = :source AND course_id NOT IN (%1)")
                              .arg(placeholders.join(QLatin1Char(','))));
+            mark.bindValue(QStringLiteral(":source"), source);
             for (int i = 0; i < courses.size(); ++i) {
                 mark.bindValue(QStringLiteral(":id%1").arg(i), courses.at(i).courseId);
             }
@@ -689,7 +719,6 @@ bool SqliteRepository::applyCourseSnapshot(const QList<Course> &courses, QString
         }
     }
 
-    Q_UNUSED(now);
     return tx.commit(error);
 }
 
@@ -699,12 +728,12 @@ QList<Course> SqliteRepository::listCourses(bool includeMissing) const
     QSqlQuery query(d->db);
     const QString sql = includeMissing
                             ? QStringLiteral("SELECT course_id, course_name, detail_url, course_code,"
-                                             " department, instructors, semester_code, year_code,"
-                                             " present, last_seen_at FROM courses"
+                                             " department, instructors, source, semester_code,"
+                                             " year_code, present, last_seen_at FROM courses"
                                              " ORDER BY course_name")
                             : QStringLiteral("SELECT course_id, course_name, detail_url, course_code,"
-                                             " department, instructors, semester_code, year_code,"
-                                             " present, last_seen_at FROM courses"
+                                             " department, instructors, source, semester_code,"
+                                             " year_code, present, last_seen_at FROM courses"
                                              " WHERE present = 1 ORDER BY course_name");
     if (!query.exec(sql)) {
         d->lastError = query.lastError().text();
@@ -721,14 +750,15 @@ QList<Course> SqliteRepository::listCourses(bool includeMissing) const
             c.department = query.value(4).toString();
         }
         c.instructors = splitList(query.value(5).toString());
-        if (!query.value(6).isNull()) {
-            c.semesterCode = query.value(6).toString();
-        }
+        c.source = query.value(6).toString();
         if (!query.value(7).isNull()) {
-            c.academicYearCode = query.value(7).toString();
+            c.semesterCode = query.value(7).toString();
         }
-        c.present = query.value(8).toInt() != 0;
-        if (const auto seen = timeutil::parseSiteTime(query.value(9).toString());
+        if (!query.value(8).isNull()) {
+            c.academicYearCode = query.value(8).toString();
+        }
+        c.present = query.value(9).toInt() != 0;
+        if (const auto seen = timeutil::parseSiteTime(query.value(10).toString());
             seen.has_value()) {
             c.lastSeenAt = *seen;
         }

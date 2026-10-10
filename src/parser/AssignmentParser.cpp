@@ -316,6 +316,8 @@ Course AssignmentParser::parseCourse(const QJsonObject &obj, const QDateTime &ob
                                      ParseIssues *issues)
 {
     Course c;
+    // 本解析器只服务智汇南雍：课程自带来源键，写入快照时据此隔离软删除范围。
+    c.source = source_keys::kNjuLms.toString();
     c.lastSeenAt = observedAt;
     c.present = true;
 

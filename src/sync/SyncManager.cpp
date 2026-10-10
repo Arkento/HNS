@@ -380,7 +380,8 @@ void SyncManager::discoverCourses()
 
         // 课程列表写入数据库：即使随后采集中断，课程也已被发现（场景 G）
         QString repoError;
-        if (!d->repository->applyCourseSnapshot(result.courses, &repoError)) {
+        if (!d->repository->applyCourseSnapshot(source_keys::kNjuLms.toString(),
+                                                result.courses, &repoError)) {
             finishRun(Outcome::Failed,
                       QStringLiteral("cannot persist course list: %1").arg(repoError));
             return;
