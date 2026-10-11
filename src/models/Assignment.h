@@ -158,6 +158,15 @@ struct Assignment {
     /// present 是整条记录的在场性，Missing 是单个字段本轮没拿到。
     bool present = true;
 
+    /// 用户手动软删除（iPad 前端「未提交 → 删除」）：
+    /// 与同步的 present 完全独立——present 表示"站点上还在不在"，
+    /// userDeleted 表示"用户还想不想看到它"。同步（upsert）不触碰这两个字段，
+    /// 因此用户删掉的条目在后续同步里不会复活；恢复只能由用户显式操作。
+    bool userDeleted = false;
+
+    /// 用户执行软删除的时间（UTC）；userDeleted=false 时无意义
+    std::optional<QDateTime> userDeletedAt;
+
     QString contentHash;
 
     /// 计算 contentHash 时采用的规范化输入摘要（便于调试与测试断言，不含正文）

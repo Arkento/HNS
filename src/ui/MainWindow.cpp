@@ -361,6 +361,12 @@ QJsonObject assignmentRow(const Course &course, const Assignment &item, bool wit
     }
     row.insert(QStringLiteral("dueUrgent"), dueUrgent);
 
+    // 用户软删除时间（「已删除」tab 显示"删除于 …"）；只在确实删除过时给出
+    if (item.userDeletedAt.has_value()) {
+        row.insert(QStringLiteral("deletedAt"),
+                   timeutil::toBeijingDisplay(item.userDeletedAt.value()));
+    }
+
     // 原站详情链接（前端那个「↗」按钮用）。
     // 只放行 https + 已知站点域名（南大 / 学习通）：详情链接是按站点路由
     // 推导或从页面提取的，万一哪天解析出别的域名，也不该变成前端一个
@@ -624,6 +630,12 @@ void MainWindow::startWebServer()
     sources.resumeSync = [this]() { return resumeWebSync(); };
     sources.cancelSync = [this]() { return cancelWebSync(); };
     sources.purgeData = [this](const QString &confirm) { return purgeWebData(confirm); };
+    sources.deleteAssignment = [this](const QString &courseId, const QString &sourceId) {
+        return deleteWebAssignment(courseId, sourceId);
+    };
+    sources.restoreAssignment = [this](const QString &courseId, const QString &sourceId) {
+        return restoreWebAssignment(courseId, sourceId);
+    };
 
     d->webApi = std::make_unique<WebApi>(sources);
     d->webServer = std::make_unique<WebServer>(d->webApi.get());
@@ -779,17 +791,23 @@ QJsonArray MainWindow::buildAssignmentsJson(const QString &courseId) const
 }
 
 /**
- * 跨课程的作业集合：iPad 上两个 tab 的数据源。
+ * 跨课程的作业集合：iPad 上各 tab 的数据源。
  *
  * 排序口径（在界面上会写明，避免误导）：
  *   * pending   = 未提交 + 已逾期，按**截止时间升序**（最急的在前）；
  *   * submitted = 已提交，按**发布时间降序**（用户指定）；发布时间缺失的那几条
- *     退化为按截止时间降序排在其后，不能让"没有发布时间的记录"乱插在中间。
- * 说明文本只在 pending 里带：已提交那一栏只列标题与时间，不带正文。
+ *     退化为按截止时间降序排在其后，不能让"没有发布时间的记录"乱插在中间；
+ *   * deleted   = 用户手动软删除的回收站（v5），按**删除时间降序**（最近删的在前）。
+ * 说明文本只在 pending / deleted 里带：已提交那一栏只列标题与时间，不带正文。
+ *
+ * 用户软删除（userDeleted）与同步软删除（present）相互独立：
+ * pending / submitted 一律排除 userDeleted 的记录；deleted 只列 userDeleted 且
+ * 仍在站点上的记录。恢复（user_deleted=0）后按它自身的状态回到前两个列表。
  */
 QJsonArray MainWindow::buildAssignmentsByScope(const QString &scope) const
 {
     const bool wantPending = scope == QLatin1String("pending");
+    const bool wantDeleted = scope == QLatin1String("deleted");
     const QList<Course> courses = d->repository->listCourses();
 
     // 未提交的排序键：先按"紧急程度"分层，再按截止时间由近到远（用户需求）：
@@ -806,6 +824,26 @@ QJsonArray MainWindow::buildAssignmentsByScope(const QString &scope) const
     for (const Course &course : courses) {
         const QList<Assignment> assignments = d->repository->listAssignments(course.courseId);
         for (const Assignment &item : assignments) {
+            // 回收站：不看状态（删的时候可能是未提交，之后可能变成已提交），
+            // 只看"用户删过 + 站点上还在"
+            if (wantDeleted) {
+                if (!item.userDeleted) {
+                    continue;
+                }
+                SortedRow entry;
+                if (item.userDeletedAt.has_value()) {
+                    entry.key = item.userDeletedAt.value();
+                }
+                entry.row = assignmentRow(course, item, /*withCourseName=*/true,
+                                          /*withDescription=*/true);
+                sorted.append(entry);
+                continue;
+            }
+
+            // 用户手动软删除的记录不进 pending / submitted（同步也不复活）
+            if (item.userDeleted) {
+                continue;
+            }
             if (!item.status.hasValue()) {
                 continue;
             }
@@ -1056,6 +1094,41 @@ WebActionResult MainWindow::purgeWebData(const QString &confirm)
     QJsonObject payload;
     payload.insert(QStringLiteral("removed"), removed);
     return WebActionResult{true, 200, {}, payload};
+}
+
+/**
+ * 用户手动软删除 / 恢复一条作业（iPad 前端）。
+ *
+ * 只改 user_deleted 标记，不删数据、不动同步断点；同步进行中也可以操作
+ * （WebApi 已把请求排进主线程，和同步的写库天然串行，不存在并发写）。
+ */
+WebActionResult MainWindow::deleteWebAssignment(const QString &courseId, const QString &sourceId)
+{
+    QString error;
+    bool found = true;
+    if (!d->repository->setAssignmentUserDeleted(courseId, sourceId, true, &error, &found)) {
+        if (found) {
+            appendLog(QStringLiteral("iPad 端删除作业失败：%1").arg(error), true);
+        }
+        return WebActionResult{false, found ? 500 : 404, error, {}};
+    }
+    appendLog(QStringLiteral("iPad 端软删除了作业 %1（课程 %2）；同步不会将其复活，可在「已删除」恢复。")
+                  .arg(sourceId, courseId));
+    return WebActionResult{true, 200, {}, {}};
+}
+
+WebActionResult MainWindow::restoreWebAssignment(const QString &courseId, const QString &sourceId)
+{
+    QString error;
+    bool found = true;
+    if (!d->repository->setAssignmentUserDeleted(courseId, sourceId, false, &error, &found)) {
+        if (found) {
+            appendLog(QStringLiteral("iPad 端恢复作业失败：%1").arg(error), true);
+        }
+        return WebActionResult{false, found ? 500 : 404, error, {}};
+    }
+    appendLog(QStringLiteral("iPad 端恢复了作业 %1（课程 %2）。").arg(sourceId, courseId));
+    return WebActionResult{true, 200, {}, {}};
 }
 
 QString MainWindow::readLogTail(int lines)

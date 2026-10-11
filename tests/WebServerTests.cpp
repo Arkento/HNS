@@ -200,6 +200,13 @@ private slots:
                 row.insert(QStringLiteral("descriptionText"),
                            QStringLiteral("普通物理学（第八版）上册 1-23"));
                 rows.append(row);
+            } else if (scope == QLatin1String("deleted")) {
+                QJsonObject row;
+                row.insert(QStringLiteral("courseId"), QStringLiteral("11311"));
+                row.insert(QStringLiteral("courseName"), QStringLiteral("微积分I(第一层次)12班"));
+                row.insert(QStringLiteral("title"), QStringLiteral("第三次作业"));
+                row.insert(QStringLiteral("deletedAt"), QStringLiteral("2026-10-11 19:40"));
+                rows.append(row);
             }
             return rows;
         };
@@ -227,6 +234,17 @@ private slots:
                      .toArray()
                      .size(),
                  0);
+
+        // 回收站（软删除）：v5 新增的第三个 scope
+        const auto deleted =
+            httpGet(server.port(), QStringLiteral("/api/assignments?scope=deleted"));
+        QCOMPARE(deleted.first, 200);
+        const QJsonArray deletedRows = QJsonDocument::fromJson(deleted.second)
+                                           .object()
+                                           .value(QStringLiteral("data"))
+                                           .toArray();
+        QCOMPARE(deletedRows.size(), 1);
+        QVERIFY(deletedRows.first().toObject().contains(QStringLiteral("deletedAt")));
 
         const auto badScope = httpGet(server.port(), QStringLiteral("/api/assignments?scope=whatever"));
         QCOMPARE(badScope.first, 400);
@@ -326,6 +344,67 @@ private slots:
                           R"({"confirm":"DELETE"})", QByteArray())
                      .first,
                  401);
+
+        server.stop();
+    }
+
+    /// v5：单条作业软删除 / 恢复接口——令牌、参数校验与后端裁决透传
+    void assignmentSoftDeleteEndpoints()
+    {
+        WebSources sources;
+        sources.deleteAssignment =
+            [](const QString &courseId, const QString &sourceId) -> WebActionResult {
+            if (courseId != QLatin1String("90001") || sourceId != QLatin1String("homework-1")) {
+                return WebActionResult{
+                    false, 404,
+                    QStringLiteral("作业不存在（可能在最近一次同步中被移除）"), {}};
+            }
+            return WebActionResult{true, 200, {}, {}};
+        };
+        sources.restoreAssignment =
+            [](const QString &, const QString &) -> WebActionResult {
+            return WebActionResult{true, 200, {}, {}};
+        };
+
+        WebApi api(sources);
+        WebServer server(&api);
+        server.setAuthToken(QStringLiteral("secret-token"));
+        QString error;
+        QVERIFY2(server.start(0, &error), qPrintable(error));
+
+        const QByteArray body = R"({"courseId":"90001","sourceId":"homework-1"})";
+
+        // 写操作必须带令牌
+        QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/delete"), body,
+                          QByteArray())
+                     .first,
+                 401);
+        QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/restore"), body,
+                          QByteArray())
+                     .first,
+                 401);
+
+        // 缺字段 → 400（不进入后端）
+        QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/delete"),
+                          R"({"courseId":"90001"})", "secret-token")
+                     .first,
+                 400);
+
+        // 正常删除 / 恢复 → 200
+        QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/delete"), body,
+                          "secret-token")
+                     .first,
+                 200);
+        QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/restore"), body,
+                          "secret-token")
+                     .first,
+                 200);
+
+        // 后端 404（行不存在）原因原样透传给前端
+        const auto missing = httpPost(server.port(), QStringLiteral("/api/assignments/delete"),
+                                      R"({"courseId":"90001","sourceId":"nope"})", "secret-token");
+        QCOMPARE(missing.first, 404);
+        QVERIFY(missing.second.contains(QStringLiteral("不存在").toUtf8()));
 
         server.stop();
     }

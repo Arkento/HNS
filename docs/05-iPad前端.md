@@ -10,7 +10,7 @@
 | 前端实现 | `resources/web/index.html`、`app.js`、`style.css`（编进 exe 的 Qt 资源） |
 | 外部入口 | `tailscale serve --bg --https=443 http://127.0.0.1:8790`，TLS 由 Tailscale 终止 |
 | 写操作保护 | 访问令牌（QSettings `web/token`，首次启动生成；托盘菜单「复制访问令牌」） |
-| 页面结构 | 三个 tab：未提交（todo 卡片）/ 已提交（按课程分组）/ 设置 |
+| 页面结构 | 四个 tab：未提交（todo 卡片）/ 已提交（按课程分组）/ 已删除（软删除回收站）/ 设置 |
 
 ## 1. 结构
 
@@ -64,6 +64,7 @@ HTTP 线程只做 JSON 序列化，任何数据访问都通过 `WebApi::run()` �
 | GET | `/api/courses` | 课程列表（含作业条数） |
 | GET | `/api/assignments?scope=pending` | 跨课程未提交（含已逾期），带纯文本说明，按截止时间升序 |
 | GET | `/api/assignments?scope=submitted` | 跨课程已提交，按发布时间降序（缺失者按其截止时间降序排在其后） |
+| GET | `/api/assignments?scope=deleted` | 用户软删除的回收站（仅"用户删了、站点上还在"的记录），按删除时间降序 |
 | GET | `/api/courses/{id}/assignments` | 单课程（早期接口，保留） |
 | GET | `/api/logs?tail=N` | 日志尾部（N 夹取到 1..2000，只读文件末 256 KB） |
 | GET | `/`、`/app.js`、`/style.css` | 前端页面（编进 exe 的资源） |
@@ -76,9 +77,30 @@ HTTP 线程只做 JSON 序列化，任何数据访问都通过 `WebApi::run()` �
 | POST | `/api/sync` | `{"mode":"incremental"｜"full"}` |
 | POST | `/api/sync/pause`、`/api/sync/resume`、`/api/sync/cancel` | 暂停 / 继续 / 取消 |
 | POST | `/api/data/purge` | `{"confirm":"DELETE"}` 清空采集数据（保留登录状态）；同步进行中返回 409 |
+| POST | `/api/assignments/delete` | `{"courseId":"…","sourceId":"…"}` 单条**软删除**（只打标记不删数据）；行不存在返回 404 |
+| POST | `/api/assignments/restore` | 同上参数，撤销软删除；恢复后按自身状态回到「未提交 / 已提交」 |
 
 失败响应统一为 `{"ok":false,"error":{"message":"..."}}`（400 参数错误 / 401 令牌 /
 409 与当前状态冲突 / 500 异常）；未注册路径返回 404；处理函数抛异常返回 500。
+
+### 单条软删除（v5，2026-10-11）
+
+「未提交」每张卡片行尾有删除按钮：软删除（`assignments.user_deleted`），
+数据保留在库里，出现在「已删除」tab，可随时点「恢复」放回；删除后 6 秒内
+提示条上还有一个「撤销」快捷入口。语义要点：
+
+- 与同步的 `present`（"站点上还在不在"）**互相独立**：同步 upsert 不写
+  `user_deleted` 列，用户删掉的条目在后续同步里**不会复活**（有测试固定这条）；
+- 恢复后按条目自身状态回到「未提交 / 已提交」；站点上已经消失（present=0）的
+  记录不进回收站（恢复回去也无处可显示）；
+- 同步进行中也可以删除/恢复：请求同样走 `WebApi` 主线程串行通道，不存在并发写库。
+
+前端交互按"真实状态驱动的动画"实现（无框架、无新增依赖，Web Animations API + FLIP）：
+点击删除立刻播退场动画（高度+间距收到 0、淡出、轻微缩小，邻居连续补位），
+**后端确认成功后才提交数据状态**，失败则反向展开恢复并提示原因；
+连续删除多张卡片时状态提交挂起（`uiOps`）到所有动画结束，避免重建打断动画；
+新条目（如撤销恢复、同步采到新作业）从 0.97 缩放 + 淡入，重排走 FLIP；
+`prefers-reduced-motion` 开启时全部动画降级为瞬时。
 
 ## 4. 怎么用
 

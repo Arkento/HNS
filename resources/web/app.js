@@ -2,10 +2,17 @@
  * iPad 前端的全部逻辑。
  *
  * 结构：
- *   * 三个 tab（未提交 / 已提交 / 设置）在同一个页面里切换，不重新加载；
- *   * 轮询：状态 2 秒，两个列表 30 秒；页面切到后台就停（省电），回前台立刻刷新；
+ *   * 四个 tab（未提交 / 已提交 / 已删除 / 设置）在同一个页面里切换，不重新加载；
+ *   * 轮询：状态 2 秒，列表 30 秒；页面切到后台就停（省电），回前台立刻刷新；
  *   * 写操作（改设置、触发同步）都必须带访问令牌，并且**只以后端返回的能力为准**：
  *     后端说不能做（正在同步）就置灰按钮、把原因显示出来，前端不自己猜状态。
+ *
+ * 删除是**软删除**：只标记、不删数据，可以在「已删除」里恢复；
+ * 动画（条目退场/入场、布局 FLIP）与数据状态严格分离：
+ *   * 点击删除 → 立刻播退场动画（不等网络）；
+ *   * 后端确认成功 → 才提交本地状态；失败 → 反向恢复 + 提示原因；
+ *   * 有退场动画在播时，后台轮询的列表重建会被挂起（uiOps / renderDirty），
+ *     避免"动画播到一半节点被重建"导致的断帧与跳位。
  */
 
 'use strict';
@@ -19,6 +26,24 @@ const OFFLINE_AFTER_MS = 8000;
 
 const FONT_SIZES = { small: '15px', normal: '17px', large: '19.5px', xlarge: '22px' };
 
+/**
+ * 动画规范（与 style.css 里的 --dur-* / --ease-* 一一对应，改一处要同步另一处）。
+ * 只调一条曲线、一组时长：按压 → 条目 → 布局 → 页面，速度依次放慢。
+ */
+const MOTION = {
+  item: 240,       // 条目增删（180–280ms）
+  layout: 280,     // 卡片重排 FLIP（220–350ms）
+  page: 260,       // tab 切换（250–400ms）
+  stagger: 30,     // 多条同时入场时的错开量
+  maxStagger: 4,   // 错开的最多条数（再多就一起进，不做"多米诺"）
+  easeOut: 'cubic-bezier(0.22, 0.61, 0.36, 1)',
+  easeInOut: 'cubic-bezier(0.4, 0, 0.2, 1)',
+};
+
+/// 系统"减少动态效果"：开着一律不做非必要动画（读的是实时值，改设置立即生效）
+const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+const reduceMotion = () => motionQuery.matches;
+
 const state = {
   tab: localStorage.getItem('njulms.tab') || 'pending',
   fontSize: localStorage.getItem('njulms.fontSize') || 'normal',
@@ -26,7 +51,10 @@ const state = {
   status: null,
   pending: [],
   submitted: [],
+  /// 回收站（软删除的作业，服务端 scope=deleted）
+  deleted: [],
   openPending: new Set(),
+  openDeleted: new Set(),
   openCourses: new Set(),
   lastOkAt: Date.now(),
   lastListsAt: 0,
@@ -38,6 +66,17 @@ const state = {
   busy: false,
   /// 上一帧看到的那次运行：{ id, running }。用来识别"采集刚结束"
   runState: { id: 0, running: false },
+  /// 正在播放的删除/恢复退场动画数：>0 时列表重建被挂起（见 renderDirty）
+  uiOps: 0,
+  /// 哪些列表有"被挂起的重建"（数组更新了但没画），动画结束后统一补渲染
+  renderDirty: { pending: false, deleted: false },
+  /// 上一次真正渲染出来的 key 集合：新 key 播入场动画、老 key 做 FLIP 差分
+  pendingSnapshot: null,
+  deletedSnapshot: null,
+  pendingRenderedOnce: false,
+  deletedRenderedOnce: false,
+  /// 首屏（第一次 selectTab）不做页面转场，避免刚打开就"闪一下"
+  booted: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -92,13 +131,39 @@ async function api(path, options = {}) {
   return payload.data;
 }
 
-function toast(message, isError) {
+/**
+ * 提示条。可选的第三个参数带一个动作按钮（删除后的「撤销」）：
+ *   toast('已删除「xx」', false, { label: '撤销', seconds: 6, onClick() {} })
+ * 动作只在提示条可见期间有效；弹出新提示时旧动作自动被替换。
+ */
+function toast(message, isError, action) {
   const node = el('toast');
-  node.textContent = message;
+  el('toast-text').textContent = message;
+  const button = el('toast-action');
+  if (action && action.label) {
+    button.hidden = false;
+    button.textContent = action.label;
+    button.onclick = () => {
+      hideToast();
+      action.onClick();
+    };
+  } else {
+    button.hidden = true;
+    button.onclick = null;
+  }
   node.className = isError ? 'toast error' : 'toast';
   node.hidden = false;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { node.hidden = true; }, isError ? 6000 : 3000);
+  const holdMs = action && action.seconds ? action.seconds * 1000 : (isError ? 6000 : 3000);
+  toast.timer = setTimeout(hideToast, holdMs);
+}
+
+function hideToast() {
+  clearTimeout(toast.timer);
+  const node = el('toast');
+  if (node) {
+    node.hidden = true;
+  }
 }
 
 /**
@@ -280,71 +345,293 @@ function kindTag(row) {
   return `<span class="tag ${cls}">${escapeHtml(label)}</span>`;
 }
 
-function renderPending() {
-  const container = el('pending-list');
-  const count = state.pending.length;
-  el('pending-count').textContent = count ? String(count) : '';
-  el('pending-meta').textContent =
-    count ? `临期（48 小时内）与已逾期优先 · 按截止时间由近到远 · ${count} 条` : '';
+/// 行尾跳转按钮（原站详情页，交给 Safari）
+function jumpButton(row) {
+  if (!row.detailUrl) {
+    return '';
+  }
+  return `<button class="item-jump" type="button" data-detail-url="${escapeHtml(row.detailUrl)}"
+                 aria-label="在原网站打开这条作业">↗</button>`;
+}
 
-  if (!count) {
-    container.innerHTML = '<p class="empty">没有未提交的作业。<br>数据来自 PC 端最近一次采集。</p>';
+/// 展开区的作业说明（未提交 / 已删除共用）
+function descriptionHtml(row) {
+  if (!row.descriptionText) {
+    return '<p class="description empty">站点没有提供这条作业的说明。</p>';
+  }
+  const truncated = row.descriptionTruncated ? '\n（内容过长，已截断）' : '';
+  return `<p class="description">${escapeHtml(row.descriptionText)}${truncated}</p>`;
+}
+
+/// 垃圾桶图标（内联 SVG：不引外部资源，颜色跟随 CSS 的 currentColor）
+const ICON_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + 'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M4 7h16M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/>'
+  + '<path d="m6.5 7 .7 11.1A2 2 0 0 0 9.2 20h5.6a2 2 0 0 0 2-1.9L17.5 7"/></svg>';
+
+/// 未提交卡片（todo 样式；行尾多一个删除按钮）
+function pendingItemHtml(row) {
+  const key = pendingKey(row);
+  const open = state.openPending.has(key);
+  const overdue = row.status === '已逾期';
+  // 倒计时（剩余时间）：临期 ≤48 小时或已逾期时标红（后端 dueUrgent 已按 UTC 精确判断）
+  const countdown = row.dueRelative
+    ? ` · <span class="countdown${row.dueUrgent ? ' urgent' : ''}">${escapeHtml(row.dueRelative)}</span>`
+    : '';
+  return `
+    <article class="item${open ? ' open' : ''}" data-key="${escapeHtml(key)}">
+      <div class="item-head">
+        <button class="item-toggle" type="button" aria-expanded="${open}">
+          ${kindTag(row)}
+          <span class="item-main">
+            <span class="item-title">${escapeHtml(row.title)}</span>
+            <span class="item-meta">截止 ${escapeHtml(row.dueAt || '未知')}${countdown}</span>
+            <span class="item-meta">${escapeHtml(row.courseName || '')}</span>
+          </span>
+          <span class="item-side">
+            ${row.sourceLabel
+              ? `<span class="chip chip-source">${escapeHtml(row.sourceLabel)}</span>` : ''}
+            ${overdue ? '<span class="chip chip-bad">已逾期</span>' : ''}
+            <span class="chev"></span>
+          </span>
+        </button>
+        ${jumpButton(row)}
+        <button class="item-del" type="button" data-del-key="${escapeHtml(key)}"
+                aria-label="删除这条作业（软删除，可在「已删除」恢复）">${ICON_TRASH}</button>
+      </div>
+      <div class="collapse">
+        <div class="collapse-inner">
+          <div class="item-body">
+            <h3>作业内容与要求</h3>
+            ${descriptionHtml(row)}
+            <dl class="meta-grid">
+              <dt>课程</dt><dd>${escapeHtml(row.courseName || '')}</dd>
+              <dt>站点</dt><dd>${escapeHtml(row.sourceLabel || '未知')}</dd>
+              <dt>类型</dt><dd>${escapeHtml(row.kindLabel || '作业')}</dd>
+              <dt>状态</dt><dd>${escapeHtml(row.status)}</dd>
+              <dt>发布</dt><dd class="mono">${escapeHtml(row.publishedAt || '未知')}</dd>
+              <dt>来源</dt><dd class="mono">${escapeHtml(row.sourceId)}</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </article>`;
+}
+
+/// 已删除卡片：与未提交同构，行尾按钮换成「恢复」，元信息带删除时间
+function deletedItemHtml(row) {
+  const key = pendingKey(row);
+  const open = state.openDeleted.has(key);
+  return `
+    <article class="item${open ? ' open' : ''}" data-key="${escapeHtml(key)}">
+      <div class="item-head">
+        <button class="item-toggle" type="button" aria-expanded="${open}">
+          ${kindTag(row)}
+          <span class="item-main">
+            <span class="item-title">${escapeHtml(row.title)}</span>
+            <span class="item-meta">删除于 ${escapeHtml(row.deletedAt || '未知')} · 截止 ${escapeHtml(row.dueAt || '未知')}</span>
+            <span class="item-meta">${escapeHtml(row.courseName || '')}</span>
+          </span>
+          <span class="item-side">
+            ${row.sourceLabel
+              ? `<span class="chip chip-source">${escapeHtml(row.sourceLabel)}</span>` : ''}
+            <span class="chev"></span>
+          </span>
+        </button>
+        ${jumpButton(row)}
+        <button class="item-restore" type="button" data-undo-key="${escapeHtml(key)}"
+                aria-label="恢复这条作业">恢复</button>
+      </div>
+      <div class="collapse">
+        <div class="collapse-inner">
+          <div class="item-body">
+            <h3>作业内容与要求</h3>
+            ${descriptionHtml(row)}
+            <dl class="meta-grid">
+              <dt>课程</dt><dd>${escapeHtml(row.courseName || '')}</dd>
+              <dt>站点</dt><dd>${escapeHtml(row.sourceLabel || '未知')}</dd>
+              <dt>类型</dt><dd>${escapeHtml(row.kindLabel || '作业')}</dd>
+              <dt>删除</dt><dd class="mono">${escapeHtml(row.deletedAt || '未知')}</dd>
+              <dt>截止</dt><dd class="mono">${escapeHtml(row.dueAt || '未知')}</dd>
+              <dt>来源</dt><dd class="mono">${escapeHtml(row.sourceId)}</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </article>`;
+}
+
+// ---------------------------------------------------------------------------
+// 动画：条目增删 / 布局重排（FLIP）
+//
+// 为什么用 Web Animations API 而不是 CSS class：删除流程要"等动画真的播完"
+// 才能提交数据状态（成功）或反向恢复（失败）—— WAAPI 的 finished Promise
+// 是唯一能可靠等待动画结束的方式；CSS transition 只能靠猜时长。
+// ---------------------------------------------------------------------------
+
+/// 记录容器里每个条目的纵向位置（相对容器顶部），供 FLIP 计算位移
+function captureTops(container) {
+  const tops = new Map();
+  const base = container.getBoundingClientRect().top;
+  for (const node of container.querySelectorAll('.item[data-key]')) {
+    tops.set(node.dataset.key, node.getBoundingClientRect().top - base);
+  }
+  return tops;
+}
+
+/// FLIP：重建后把"位置变了的老条目"先用反向位移放回旧位置，再平滑归零
+function playLayoutShift(container, prevTops) {
+  if (reduceMotion()) {
+    return;
+  }
+  const base = container.getBoundingClientRect().top;
+  for (const node of container.querySelectorAll('.item[data-key]')) {
+    const prev = prevTops.get(node.dataset.key);
+    if (prev === undefined) {
+      continue;
+    }
+    const delta = prev - (node.getBoundingClientRect().top - base);
+    if (Math.abs(delta) < 1.5) {
+      continue;   // 位置几乎没变：不播无意义的微动
+    }
+    node.animate(
+      [{ transform: `translateY(${delta.toFixed(1)}px)` }, { transform: 'translateY(0)' }],
+      { duration: MOTION.layout, easing: MOTION.easeOut },
+    );
+  }
+}
+
+/// 新条目入场：轻微缩小 + 小幅下移 + 淡入（不弹跳；多条错开一点点）
+function playEnter(node, index) {
+  if (reduceMotion()) {
+    return;
+  }
+  const delay = Math.min(index, MOTION.maxStagger) * MOTION.stagger;
+  node.animate([
+    { opacity: 0, transform: 'scale(0.97) translateY(-6px)' },
+    { opacity: 1, transform: 'none' },
+  ], { duration: MOTION.item, easing: MOTION.easeOut, delay });
+}
+
+/**
+ * 条目退场：高度 + 下方间距一起收到 0（邻居全程连续补位，不跳位），
+ * 同时淡出并轻微缩小。
+ * @return {Promise<{height:number, margin:number}>} 原尺寸，失败时用于反向恢复
+ */
+function playExit(card) {
+  const geo = {
+    height: card.offsetHeight,
+    margin: parseFloat(getComputedStyle(card).marginBottom) || 0,
+  };
+  card.classList.add('leaving');
+  if (reduceMotion()) {
+    return Promise.resolve(geo);
+  }
+  const animation = card.animate([
+    { height: `${geo.height}px`, marginBottom: `${geo.margin}px`, opacity: 1, transform: 'none' },
+    { height: '0px', marginBottom: '0px', opacity: 0, transform: 'scale(0.97)' },
+  ], { duration: MOTION.item, easing: MOTION.easeInOut, fill: 'forwards' });
+  card.__exitAnimation = animation;
+  // finished 在动画被取消时 reject；吞掉异常，调用方只关心"已经结束了"
+  return animation.finished.catch(() => {}).then(() => geo);
+}
+
+/// 退场失败：取消退场（同一帧内接反向展开，不会闪一下全高）并恢复交互
+function playExitBack(card, geo) {
+  if (card.__exitAnimation) {
+    card.__exitAnimation.cancel();
+    card.__exitAnimation = null;
+  }
+  card.classList.remove('leaving');
+  if (reduceMotion()) {
+    return;
+  }
+  card.animate([
+    { height: '0px', marginBottom: '0px', opacity: 0, transform: 'scale(0.97)' },
+    { height: `${geo.height}px`, marginBottom: `${geo.margin}px`, opacity: 1, transform: 'none' },
+  ], { duration: MOTION.item, easing: MOTION.easeOut });
+}
+
+/**
+ * 软列表（未提交 / 已删除）的差量渲染。
+ *
+ * 流程：记录旧位置与旧 key → innerHTML 重建（沿用项目原有的模板渲染方式）→
+ * 老条目位置变化播 FLIP、新条目播入场 → 更新快照。
+ * 有退场动画在播时**挂起**（uiOps > 0）：否则重建会把正在退场的节点直接抽走，
+ * 出现断帧、邻居跳位；挂起的渲染在最后一个动画结束时由 finishUiOp() 补上。
+ * 首屏不播入场动画；tab 不可见时也不播（切过去时直接是最终样式）。
+ */
+function renderAnimatedList(cfg) {
+  if (state.uiOps > 0) {
+    state.renderDirty[cfg.dirtyProp] = true;
+    return;
+  }
+  const container = el(cfg.containerId);
+  if (!cfg.rows.length) {
+    container.innerHTML = cfg.emptyHtml;
+    state[cfg.snapshotProp] = new Set();
+    state[cfg.onceProp] = true;
     return;
   }
 
-  container.innerHTML = state.pending.map((row) => {
-    const key = pendingKey(row);
-    const open = state.openPending.has(key);
-    const overdue = row.status === '已逾期';
-    // 倒计时（剩余时间）：临期 ≤48 小时或已逾期时标红（后端 dueUrgent 已按 UTC 精确判断）
-    const countdown = row.dueRelative
-      ? ` · <span class="countdown${row.dueUrgent ? ' urgent' : ''}">${escapeHtml(row.dueRelative)}</span>`
-      : '';
-    const description = row.descriptionText
-      ? `<p class="description">${escapeHtml(row.descriptionText)}${
-          row.descriptionTruncated ? '\n（内容过长，已截断）' : ''}</p>`
-      : '<p class="description empty">站点没有提供这条作业的说明。</p>';
-    const jump = row.detailUrl
-      ? `<button class="item-jump" type="button" data-detail-url="${escapeHtml(row.detailUrl)}"
-                 aria-label="在原网站打开这条作业">↗</button>`
-      : '';
-    return `
-      <article class="item${open ? ' open' : ''}" data-key="${escapeHtml(key)}">
-        <div class="item-head">
-          <button class="item-toggle" type="button" aria-expanded="${open}">
-            ${kindTag(row)}
-            <span class="item-main">
-              <span class="item-title">${escapeHtml(row.title)}</span>
-              <span class="item-meta">截止 ${escapeHtml(row.dueAt || '未知')}${countdown}</span>
-              <span class="item-meta">${escapeHtml(row.courseName || '')}</span>
-            </span>
-            <span class="item-side">
-              ${row.sourceLabel
-                ? `<span class="chip chip-source">${escapeHtml(row.sourceLabel)}</span>` : ''}
-              ${overdue ? '<span class="chip chip-bad">已逾期</span>' : ''}
-              <span class="chev"></span>
-            </span>
-          </button>
-          ${jump}
-        </div>
-        <div class="collapse">
-          <div class="collapse-inner">
-            <div class="item-body">
-              <h3>作业内容与要求</h3>
-              ${description}
-              <dl class="meta-grid">
-                <dt>课程</dt><dd>${escapeHtml(row.courseName || '')}</dd>
-                <dt>站点</dt><dd>${escapeHtml(row.sourceLabel || '未知')}</dd>
-                <dt>类型</dt><dd>${escapeHtml(row.kindLabel || '作业')}</dd>
-                <dt>状态</dt><dd>${escapeHtml(row.status)}</dd>
-                <dt>发布</dt><dd class="mono">${escapeHtml(row.publishedAt || '未知')}</dd>
-                <dt>来源</dt><dd class="mono">${escapeHtml(row.sourceId)}</dd>
-              </dl>
-            </div>
-          </div>
-        </div>
-      </article>`;
-  }).join('');
+  const prevTops = captureTops(container);
+  const prevKeys = state[cfg.snapshotProp];
+  const wasRendered = state[cfg.onceProp];
+  const visible = state.tab === cfg.tab;
+
+  container.innerHTML = cfg.rows.map(cfg.itemBuilder).join('');
+
+  if (visible && wasRendered) {
+    let index = 0;
+    for (const node of container.querySelectorAll('.item[data-key]')) {
+      if (!prevKeys || !prevKeys.has(node.dataset.key)) {
+        playEnter(node, index);
+        index += 1;
+      }
+    }
+  }
+  if (visible) {
+    playLayoutShift(container, prevTops);
+  }
+  state[cfg.snapshotProp] = new Set(cfg.rows.map(cfg.keyOf));
+  state[cfg.onceProp] = true;
+}
+
+function renderPendingAnimated() {
+  const rows = state.pending;
+  el('pending-count').textContent = rows.length ? String(rows.length) : '';
+  el('pending-meta').textContent =
+    rows.length ? `临期（48 小时内）与已逾期优先 · 按截止时间由近到远 · ${rows.length} 条` : '';
+  renderAnimatedList({
+    containerId: 'pending-list',
+    rows,
+    tab: 'pending',
+    dirtyProp: 'pending',
+    snapshotProp: 'pendingSnapshot',
+    onceProp: 'pendingRenderedOnce',
+    keyOf: pendingKey,
+    itemBuilder: pendingItemHtml,
+    emptyHtml: '<p class="empty">没有未提交的作业。<br>数据来自 PC 端最近一次采集。</p>',
+  });
+}
+
+function renderDeletedAnimated() {
+  const rows = state.deleted;
+  el('deleted-count').textContent = rows.length ? String(rows.length) : '';
+  el('deleted-meta').textContent = rows.length
+    ? `软删除 · 点「恢复」放回列表 · ${rows.length} 条`
+    : '软删除 · 点「恢复」放回列表';
+  renderAnimatedList({
+    containerId: 'deleted-list',
+    rows,
+    tab: 'deleted',
+    dirtyProp: 'deleted',
+    snapshotProp: 'deletedSnapshot',
+    onceProp: 'deletedRenderedOnce',
+    keyOf: pendingKey,
+    itemBuilder: deletedItemHtml,
+    emptyHtml: '<p class="empty">回收站是空的。<br>在「未提交」里删除的作业会出现在这里。</p>',
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -428,15 +715,18 @@ async function loadLists(force) {
     return;
   }
   state.lastListsAt = now;
-  const [pending, submitted] = await Promise.all([
+  const [pending, submitted, deleted] = await Promise.all([
     api('/api/assignments?scope=pending'),
     api('/api/assignments?scope=submitted'),
+    api('/api/assignments?scope=deleted'),
   ]);
   state.pending = pending;
   state.submitted = submitted;
+  state.deleted = deleted;
   state.listsLoaded = true;   // 之后即使断线也保留最后一次的数据
-  renderPending();
+  renderPendingAnimated();
   renderSubmitted();
+  renderDeletedAnimated();
 }
 
 /**
@@ -456,8 +746,10 @@ function renderOfflinePlaceholders() {
     + '程序启动后本页会自动刷新，不需要重开。</p>';
   el('pending-list').innerHTML = hint;
   el('submitted-list').innerHTML = hint;
+  el('deleted-list').innerHTML = hint;
   el('pending-meta').textContent = '';
   el('submitted-meta').textContent = '';
+  el('deleted-meta').textContent = '';
   el('last-run').textContent = '尚未连接';
   el('next-run').textContent = '尚未连接';
 }
@@ -567,9 +859,10 @@ function schedule() {
 // ---------------------------------------------------------------------------
 
 function selectTab(tab) {
-  if (!['pending', 'submitted', 'settings'].includes(tab)) {
+  if (!['pending', 'submitted', 'deleted', 'settings'].includes(tab)) {
     tab = 'pending';
   }
+  const changed = tab !== state.tab;
   state.tab = tab;
   localStorage.setItem('njulms.tab', tab);
   // 写进 URL：可以直接把「设置」页加到主屏幕，也方便分享某个 tab
@@ -581,8 +874,16 @@ function selectTab(tab) {
   }
   el('view-pending').hidden = tab !== 'pending';
   el('view-submitted').hidden = tab !== 'submitted';
+  el('view-deleted').hidden = tab !== 'deleted';
   el('view-settings').hidden = tab !== 'settings';
   window.scrollTo({ top: 0 });
+  // 页面转场：轻微淡入 + 上移（首屏不播；系统开启"减少动态效果"时跳过）
+  if (changed && state.booted && !reduceMotion()) {
+    el(`view-${tab}`).animate([
+      { opacity: 0, transform: 'translateY(6px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: MOTION.page, easing: MOTION.easeOut });
+  }
 }
 
 function applyFontSize(size) {
@@ -635,20 +936,41 @@ document.querySelector('.tabs').addEventListener('click', (event) => {
   }
 });
 
-el('pending-list').addEventListener('click', (event) => {
-  const button = event.target.closest('.item-toggle');
-  if (!button) {
-    return;
-  }
+/// 展开/收起一张卡片（未提交 / 已删除共用；各自的展开集合通过参数区分）
+function toggleCard(button, openSet) {
   const item = button.closest('.item');
   const key = item.dataset.key;
   const open = !item.classList.contains('open');
   item.classList.toggle('open', open);
   button.setAttribute('aria-expanded', String(open));
   if (open) {
-    state.openPending.add(key);
+    openSet.add(key);
   } else {
-    state.openPending.delete(key);
+    openSet.delete(key);
+  }
+}
+
+el('pending-list').addEventListener('click', (event) => {
+  const remove = event.target.closest('[data-del-key]');
+  if (remove) {
+    deletePendingItem(remove.closest('.item'), remove.dataset.delKey);
+    return;
+  }
+  const button = event.target.closest('.item-toggle');
+  if (button) {
+    toggleCard(button, state.openPending);
+  }
+});
+
+el('deleted-list').addEventListener('click', (event) => {
+  const restore = event.target.closest('[data-undo-key]');
+  if (restore) {
+    restoreDeletedItem(restore.closest('.item'), restore.dataset.undoKey);
+    return;
+  }
+  const button = event.target.closest('.item-toggle');
+  if (button) {
+    toggleCard(button, state.openDeleted);
   }
 });
 
@@ -679,6 +1001,161 @@ document.addEventListener('click', (event) => {
   event.stopPropagation();
   openExternal(jump.dataset.detailUrl);
 }, true);
+
+// ---------------------------------------------------------------------------
+// 删除 / 恢复（软删除）
+// ---------------------------------------------------------------------------
+
+/** 写操作的公共错误处理；不加全局 busy 锁——删除要支持连续多张卡片操作 */
+async function authPost(path, body) {
+  try {
+    return { ok: true, data: await api(path, { method: 'POST', body, auth: true }) };
+  } catch (error) {
+    if (error.status === 401) {
+      toast('访问令牌不对：请在「设置 → 访问令牌」里粘贴 PC 端托盘菜单复制的那串', true);
+    } else {
+      toast(error.message, true);
+    }
+    return { ok: false, error };
+  }
+}
+
+/// 结束一个在途界面操作：全部结束后，把被挂起的列表渲染补上
+function finishUiOp() {
+  state.uiOps = Math.max(0, state.uiOps - 1);
+  if (state.uiOps > 0) {
+    return;
+  }
+  if (state.renderDirty.pending) {
+    state.renderDirty.pending = false;
+    renderPendingAnimated();
+  }
+  if (state.renderDirty.deleted) {
+    state.renderDirty.deleted = false;
+    renderDeletedAnimated();
+  }
+}
+
+/// 本地"删除于"时间（iPad 本地时区即北京时间；服务端刷新后会用权威值替换）
+function localTimeDisplay() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * 删除一条未提交作业（软删除）。
+ *
+ * 动画与请求并行：点击立刻退场（不等网络），请求确认成功后才提交数据状态；
+ * 失败则反向恢复并提示原因——不会出现"前端显示删掉了、服务端其实还在"。
+ */
+async function deletePendingItem(card, key) {
+  if (!card || card.dataset.busy === '1') {
+    return;   // 同一张卡片重复点击：忽略（防重复删除）
+  }
+  card.dataset.busy = '1';
+  const row = state.pending.find((item) => pendingKey(item) === key);
+  if (!row) {
+    card.remove();   // 数据已被后台轮询换掉：直接清理，不再发请求
+    return;
+  }
+
+  state.uiOps += 1;
+  const request = authPost('/api/assignments/delete', {
+    courseId: row.courseId,
+    sourceId: row.sourceId,
+  });
+  const geo = await playExit(card);
+  const result = await request;
+
+  if (!result.ok) {
+    card.dataset.busy = '0';
+    playExitBack(card, geo);
+    finishUiOp();
+    return;   // 失败原因已由 authPost 提示
+  }
+
+  finishUiOp();
+  // 服务端已确认：从未提交列表移除、放进回收站（本地即时一致；下一轮轮询以服务端为准）
+  card.remove();
+  state.pending = state.pending.filter((item) => pendingKey(item) !== key);
+  if (state.pendingSnapshot) {
+    state.pendingSnapshot.delete(key);
+  }
+  const copy = Object.assign({}, row, { deletedAt: localTimeDisplay() });
+  state.deleted = [copy, ...state.deleted.filter((item) => pendingKey(item) !== key)];
+  renderPendingAnimated();
+  renderDeletedAnimated();
+  toast(`已删除「${row.title}」`, false, {
+    label: '撤销',
+    seconds: 6,
+    onClick: () => undoDelete(copy),
+  });
+}
+
+/// 撤销（恢复）一条刚删除的作业（提示条里的「撤销」）
+async function undoDelete(row) {
+  const result = await authPost('/api/assignments/restore', {
+    courseId: row.courseId,
+    sourceId: row.sourceId,
+  });
+  if (!result.ok) {
+    return;
+  }
+  const key = pendingKey(row);
+  state.deleted = state.deleted.filter((item) => pendingKey(item) !== key);
+  if (state.deletedSnapshot) {
+    state.deletedSnapshot.delete(key);
+  }
+  renderDeletedAnimated();
+  toast(`已恢复「${row.title}」`);
+  // 未提交列表的排序由服务端决定（恢复要回到正确位置）：拉一次权威数据
+  state.lastListsAt = 0;
+  loadLists(true).catch(() => {});
+}
+
+/**
+ * 恢复「已删除」里的一条（点行尾「恢复」）：先播退场动画，确认成功后才删标记；
+ * 失败同样反向恢复。恢复后强制刷新一次未提交列表，拿回服务端的排序位置。
+ */
+async function restoreDeletedItem(card, key) {
+  if (!card || card.dataset.busy === '1') {
+    return;
+  }
+  card.dataset.busy = '1';
+  const row = state.deleted.find((item) => pendingKey(item) === key);
+  if (!row) {
+    card.remove();
+    return;
+  }
+
+  state.uiOps += 1;
+  const request = authPost('/api/assignments/restore', {
+    courseId: row.courseId,
+    sourceId: row.sourceId,
+  });
+  const geo = await playExit(card);
+  const result = await request;
+
+  if (!result.ok) {
+    card.dataset.busy = '0';
+    playExitBack(card, geo);
+    finishUiOp();
+    return;
+  }
+
+  finishUiOp();
+  card.remove();
+  state.deleted = state.deleted.filter((item) => pendingKey(item) !== key);
+  if (state.deletedSnapshot) {
+    state.deletedSnapshot.delete(key);
+  }
+  renderDeletedAnimated();
+  toast(`已恢复「${row.title}」`);
+  state.lastListsAt = 0;
+  loadLists(true).catch(() => {});
+}
 
 // 手动同步
 el('btn-incremental').addEventListener('click', async () => {
@@ -806,6 +1283,7 @@ document.addEventListener('visibilitychange', () => {
 applyFontSize(state.fontSize);
 refreshTokenState();
 selectTab(new URLSearchParams(location.search).get('tab') || state.tab);
+state.booted = true;   // 首屏之后才给 tab 切换加转场动画
 
 // 脚本活过来了：撤掉 HTML 里的兜底提示（那个提示只在 app.js 加载失败时出现）
 window.__njulmsBooted = true;

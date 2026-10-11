@@ -713,7 +713,7 @@ private slots:
             QSqlQuery q(db);
             QVERIFY(q.exec(QStringLiteral("SELECT MAX(version) FROM schema_version")));
             QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 4);
+            QCOMPARE(q.value(0).toInt(), kSchemaVersion);
             QVERIFY(q.exec(QStringLiteral("PRAGMA table_info(courses)")));
             QStringList columns;
             while (q.next()) {
@@ -729,6 +729,9 @@ private slots:
                 assignmentColumns << q.value(1).toString();
             }
             QVERIFY(assignmentColumns.contains(QStringLiteral("kind")));
+            // v5：用户软删除两列（升级上来的老库必须补上默认值列）
+            QVERIFY(assignmentColumns.contains(QStringLiteral("user_deleted")));
+            QVERIFY(assignmentColumns.contains(QStringLiteral("user_deleted_at")));
             QVERIFY(q.exec(QStringLiteral(
                 "SELECT kind FROM assignments WHERE source_id = 'homework-70001'")));
             QVERIFY(q.next());
@@ -827,6 +830,89 @@ private slots:
         }
         QCOMPARE(homeworkCount, 3);   // 作业条目（解析器默认 kind=homework）
         QCOMPARE(examCount, 1);
+    }
+
+    /// v5：用户手动软删除——标记、读回、恢复；行不存在时给出 found=false
+    void assignments_userDeletionRoundTrips()
+    {
+        auto repo = openRepo(QStringLiteral("_userdel"));
+        const QString courseId = QStringLiteral("90001");
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(),
+                                          coursesFrom(fixtures::myCoursesTwoCourses())));
+        const QList<Assignment> three =
+            assignmentsFrom(fixtures::homeworkActivitiesThree(), courseId);
+        QVERIFY(repo->applyAssignmentSnapshot(courseId, three).ok);
+
+        const QString sourceId = three.first().sourceId;
+        QVERIFY(!repo->findAssignment(courseId, sourceId)->userDeleted);
+        QVERIFY(repo->listUserDeletedAssignments().isEmpty());
+
+        // 删除：标记 + 时间戳 + 进入回收站列表
+        QString error;
+        bool found = true;
+        QVERIFY2(repo->setAssignmentUserDeleted(courseId, sourceId, true, &error, &found),
+                 qPrintable(error));
+        QVERIFY(found);
+        const auto deleted = repo->findAssignment(courseId, sourceId);
+        QVERIFY(deleted.has_value());
+        QVERIFY(deleted->userDeleted);
+        QVERIFY(deleted->userDeletedAt.has_value());
+        QCOMPARE(repo->listUserDeletedAssignments().size(), 1);
+        QCOMPARE(repo->listUserDeletedAssignments().first().sourceId, sourceId);
+
+        // 重复删除：幂等（成功且不报错）
+        QVERIFY(repo->setAssignmentUserDeleted(courseId, sourceId, true, &error, &found));
+
+        // 恢复：标记清空、回收站清空
+        QVERIFY(repo->setAssignmentUserDeleted(courseId, sourceId, false, &error, &found));
+        const auto restored = repo->findAssignment(courseId, sourceId);
+        QVERIFY(!restored->userDeleted);
+        QVERIFY(!restored->userDeletedAt.has_value());
+        QVERIFY(repo->listUserDeletedAssignments().isEmpty());
+
+        // 不存在的行：found=false（接口层据此回 404 而不是 500）
+        found = true;
+        QVERIFY(!repo->setAssignmentUserDeleted(courseId, QStringLiteral("no-such-item"), true,
+                                                &error, &found));
+        QVERIFY(!found);
+    }
+
+    /// v5：用户删除后，后续同步（内容不变 / 内容变化）都不得把它"复活"
+    void assignments_userDeletionSurvivesResync()
+    {
+        auto repo = openRepo(QStringLiteral("_userdel2"));
+        const QString courseId = QStringLiteral("90001");
+        QVERIFY(repo->applyCourseSnapshot(source_keys::kNjuLms.toString(),
+                                          coursesFrom(fixtures::myCoursesTwoCourses())));
+        const QList<Assignment> three =
+            assignmentsFrom(fixtures::homeworkActivitiesThree(), courseId);
+        QVERIFY(repo->applyAssignmentSnapshot(courseId, three).ok);
+
+        const QString sourceId = three.first().sourceId;
+        QString error;
+        bool found = true;
+        QVERIFY(repo->setAssignmentUserDeleted(courseId, sourceId, true, &error, &found));
+
+        // ① 同一份快照再来一次（内容未变 → touch 路径）
+        QVERIFY(repo->applyAssignmentSnapshot(courseId, three).ok);
+        auto a = repo->findAssignment(courseId, sourceId);
+        QVERIFY(a.has_value());
+        QVERIFY(a->userDeleted);    // 不得被同步复位
+        QVERIFY(a->present);
+
+        // ② 内容变化的快照（改名 → update 路径）
+        QList<Assignment> changed = three;
+        changed[0].title = Observed<QString>::present(QStringLiteral("改名后的作业"));
+        QVERIFY(repo->applyAssignmentSnapshot(courseId, changed).ok);
+        a = repo->findAssignment(courseId, sourceId);
+        QVERIFY(a.has_value());
+        QVERIFY(a->userDeleted);    // 更新内容也不得复位
+        QCOMPARE(a->title.require(), QStringLiteral("改名后的作业"));
+        QCOMPARE(repo->listUserDeletedAssignments().size(), 1);
+
+        // ③ 恢复后回到未删除状态，且仍在列表里
+        QVERIFY(repo->setAssignmentUserDeleted(courseId, sourceId, false, &error, &found));
+        QVERIFY(!repo->findAssignment(courseId, sourceId)->userDeleted);
     }
 };
 

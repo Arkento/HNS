@@ -231,8 +231,9 @@ bool WebServer::start(quint16 port, QString *errorOut)
         const QString scope =
             req.has_param("scope") ? QString::fromStdString(req.get_param_value("scope"))
                                    : QStringLiteral("pending");
-        if (scope != QLatin1String("pending") && scope != QLatin1String("submitted")) {
-            writeError(res, 400, QStringLiteral("scope 只能是 pending 或 submitted"));
+        if (scope != QLatin1String("pending") && scope != QLatin1String("submitted")
+            && scope != QLatin1String("deleted")) {
+            writeError(res, 400, QStringLiteral("scope 只能是 pending、submitted 或 deleted"));
             return;
         }
         writeData(res, d->api->assignmentsByScope(scope));
@@ -364,6 +365,55 @@ bool WebServer::start(quint16 port, QString *errorOut)
                        }
                        writeActionResult(
                            res, d->api->purgeData(body.value(QStringLiteral("confirm")).toString()));
+                   });
+
+    // 单条作业的软删除 / 恢复（iPad「未提交 → 删除」「已删除 → 恢复」）。
+    // 与其它写操作一样要求令牌；只改 user_deleted 标记，数据保留在库里。
+    const auto assignmentKeyFromBody =
+        [](const QJsonObject &body, QString *courseId, QString *sourceId) -> bool {
+        *courseId = body.value(QStringLiteral("courseId")).toString().trimmed();
+        *sourceId = body.value(QStringLiteral("sourceId")).toString().trimmed();
+        return !courseId->isEmpty() && !sourceId->isEmpty();
+    };
+
+    d->server.Post("/api/assignments/delete",
+                   [this, authorized, assignmentKeyFromBody](const httplib::Request &req,
+                                                             httplib::Response &res) {
+                       if (!authorized(req, res)) {
+                           return;
+                       }
+                       QJsonObject body;
+                       if (!readJsonBody(req, res, &body)) {
+                           return;
+                       }
+                       QString courseId;
+                       QString sourceId;
+                       if (!assignmentKeyFromBody(body, &courseId, &sourceId)) {
+                           writeError(res, 400,
+                                      QStringLiteral("需要 courseId 与 sourceId 两个字段"));
+                           return;
+                       }
+                       writeActionResult(res, d->api->deleteAssignment(courseId, sourceId));
+                   });
+
+    d->server.Post("/api/assignments/restore",
+                   [this, authorized, assignmentKeyFromBody](const httplib::Request &req,
+                                                             httplib::Response &res) {
+                       if (!authorized(req, res)) {
+                           return;
+                       }
+                       QJsonObject body;
+                       if (!readJsonBody(req, res, &body)) {
+                           return;
+                       }
+                       QString courseId;
+                       QString sourceId;
+                       if (!assignmentKeyFromBody(body, &courseId, &sourceId)) {
+                           writeError(res, 400,
+                                      QStringLiteral("需要 courseId 与 sourceId 两个字段"));
+                           return;
+                       }
+                       writeActionResult(res, d->api->restoreAssignment(courseId, sourceId));
                    });
 
     d->server.set_exception_handler([](const httplib::Request &, httplib::Response &res,

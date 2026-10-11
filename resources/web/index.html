@@ -39,6 +39,9 @@
     <button class="tab" type="button" role="tab" data-tab="submitted" aria-selected="false">
       已提交<span id="submitted-count" class="tab-count"></span>
     </button>
+    <button class="tab" type="button" role="tab" data-tab="deleted" aria-selected="false">
+      已删除<span id="deleted-count" class="tab-count"></span>
+    </button>
     <button class="tab" type="button" role="tab" data-tab="settings" aria-selected="false">
       设置
     </button>
@@ -64,6 +67,17 @@
       <span id="submitted-meta" class="muted">按课程分组 · 组内按发布时间由新到旧</span>
     </div>
     <div id="submitted-list" class="cards">
+      <p class="empty">正在读取…</p>
+    </div>
+  </section>
+
+  <!-- ===================== 已删除（软删除回收站） ===================== -->
+  <section id="view-deleted" class="view" hidden>
+    <div class="view-head">
+      <h2>已删除的作业</h2>
+      <span id="deleted-meta" class="muted">软删除 · 点「恢复」放回列表</span>
+    </div>
+    <div id="deleted-list" class="cards">
       <p class="empty">正在读取…</p>
     </div>
   </section>
@@ -213,7 +227,10 @@
   </div>
 </div>
 
-<div id="toast" class="toast" hidden></div>
+<div id="toast" class="toast" hidden>
+  <span id="toast-text"></span>
+  <button id="toast-action" class="toast-action" type="button" hidden></button>
+</div>
 
 <!-- 兜底提示：如果外部脚本没能加载（PC 程序没开、离线外壳又没装好），
      至少让页面显示一句能看懂的话 + 一个重试按钮，而不是一片空白。

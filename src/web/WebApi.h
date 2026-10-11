@@ -51,6 +51,13 @@ struct WebSources
     std::function<WebActionResult()> cancelSync;
     /// 清空采集数据（保留登录状态）；confirm 必须等于 "DELETE"
     std::function<WebActionResult(const QString &confirm)> purgeData;
+
+    /// 用户手动软删除 / 恢复一条作业（iPad「未提交 → 删除」「已删除 → 恢复」）。
+    /// 只改 user_deleted 标记，不删数据；同步不会把用户删掉的条目"复活"。
+    std::function<WebActionResult(const QString &courseId, const QString &sourceId)>
+        deleteAssignment;
+    std::function<WebActionResult(const QString &courseId, const QString &sourceId)>
+        restoreAssignment;
 };
 
 /**
@@ -83,6 +90,8 @@ public:
     WebActionResult resumeSync();
     WebActionResult cancelSync();
     WebActionResult purgeData(const QString &confirm);
+    WebActionResult deleteAssignment(const QString &courseId, const QString &sourceId);
+    WebActionResult restoreAssignment(const QString &courseId, const QString &sourceId);
 
 private:
     template <typename Fn>

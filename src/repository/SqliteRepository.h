@@ -16,7 +16,8 @@ namespace njulms {
 /// 数据库当前结构版本。任何表结构变更都必须递增并在 migrate() 中提供迁移分支。
 /// v3：courses 增加 source（多站点：nju-lms / chaoxing）
 /// v4：assignments 增加 kind（homework / exam —— 考试接入）
-constexpr int kSchemaVersion = 4;
+/// v5：assignments 增加 user_deleted / user_deleted_at（iPad 前端手动软删除）
+constexpr int kSchemaVersion = 5;
 
 /// 采集任务运行状态（crawl_runs.status）
 struct CrawlRun
@@ -184,6 +185,24 @@ public:
     QList<Assignment> listAssignments(const QString &courseId, bool includeMissing = false) const;
     std::optional<Assignment> findAssignment(const QString &courseId, const QString &sourceId) const;
     int countAssignments(const QString &courseId) const;
+
+    /**
+     * 用户手动软删除 / 恢复一条作业（v5，iPad 前端「未提交 → 删除」）。
+     *
+     * 与同步快照的 present 软删除**完全独立**：upsert 不写这两列，
+     * 所以被用户删掉的条目在后续同步中不会被"复活"；只有显式恢复才回到列表。
+     * 幂等：重复删除/恢复同一条不会报错（不改变已有时间戳）。
+     *
+     * @param error 失败原因（面向用户）
+     * @param found 可选输出：仅当行**确定不存在**时置为 false（供调用方区分 404 与 500）
+     * @return 行存在并处理成功返回 true；行不存在或写入失败返回 false
+     */
+    bool setAssignmentUserDeleted(const QString &courseId, const QString &sourceId,
+                                  bool deleted, QString *error = nullptr,
+                                  bool *found = nullptr);
+
+    /// 用户软删除且仍在站点上的作业（iPad「已删除」tab 的数据源），按删除时间倒序
+    QList<Assignment> listUserDeletedAssignments() const;
 
     // ---- 解析异常 -----------------------------------------------------------
 

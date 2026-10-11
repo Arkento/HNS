@@ -71,6 +71,7 @@ private:
     QJsonArray buildCoursesJson() const;
     QJsonArray buildAssignmentsJson(const QString &courseId) const;
     /// "pending"（未提交 + 已逾期，按截止时间升序）/ "submitted"（按发布时间降序）
+    /// / "deleted"（用户手动软删除的回收站，按删除时间倒序）
     QJsonArray buildAssignmentsByScope(const QString &scope) const;
 
     /// 前端的写操作：复用桌面端同一批动作与同一套前置检查
@@ -81,6 +82,10 @@ private:
     WebActionResult cancelWebSync();
     /// 清空采集数据（保留登录状态）；confirm 必须等于 "DELETE"
     WebActionResult purgeWebData(const QString &confirm);
+
+    /// 用户手动软删除 / 恢复一条作业（iPad 前端）
+    WebActionResult deleteWebAssignment(const QString &courseId, const QString &sourceId);
+    WebActionResult restoreWebAssignment(const QString &courseId, const QString &sourceId);
 
     /// 访问令牌（首次调用时生成并持久化）；只用于写操作
     QString webAccessToken();

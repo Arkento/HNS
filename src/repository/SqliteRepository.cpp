@@ -76,6 +76,8 @@ QStringList schemaStatements()
             "  first_seen_at     TEXT,"
             "  last_seen_at      TEXT,"
             "  present           INTEGER NOT NULL DEFAULT 1,"
+            "  user_deleted      INTEGER NOT NULL DEFAULT 0,"
+            "  user_deleted_at   TEXT,"
             "  UNIQUE (course_id, source_id))"),
 
         QStringLiteral(
@@ -324,6 +326,17 @@ bool SqliteRepository::Impl::migrateSchema(int fromVersion)
         // v4：考试接入——作业表带上类型；历史数据默认视为作业。
         if (!addColumn(QStringLiteral("assignments"), QStringLiteral("kind"),
                        QStringLiteral("TEXT NOT NULL DEFAULT 'homework'"))) {
+            return false;
+        }
+    }
+
+    if (fromVersion < 5) {
+        // v5：用户手动软删除（iPad 前端删除功能）——与同步的 present 独立，
+        // 同步 upsert 不写这两列，被删条目不会在后续同步里复活。
+        if (!addColumn(QStringLiteral("assignments"), QStringLiteral("user_deleted"),
+                       QStringLiteral("INTEGER NOT NULL DEFAULT 0")) ||
+            !addColumn(QStringLiteral("assignments"), QStringLiteral("user_deleted_at"),
+                       QStringLiteral("TEXT"))) {
             return false;
         }
     }
@@ -1108,13 +1121,19 @@ Assignment assignmentFromQuery(const QSqlQuery &query)
     a.present = query.value(16).isNull() ? true : (query.value(16).toInt() != 0);
     const QString kind = query.value(17).toString();
     a.kind = kind.isEmpty() ? QStringLiteral("homework") : kind;
+    a.userDeleted = !query.value(18).isNull() && query.value(18).toInt() != 0;
+    if (a.userDeleted && !query.value(19).isNull()) {
+        if (const auto d = timeutil::parseSiteTime(query.value(19).toString()); d.has_value()) {
+            a.userDeletedAt = *d;
+        }
+    }
     return a;
 }
 
 constexpr auto kAssignmentColumns =
     "course_id, source_id, activity_id, title, description, detail_url, published_at, due_at,"
     " status, submitted, score, content_hash, content_signature, observed_at, first_seen_at,"
-    " last_seen_at, present, kind";
+    " last_seen_at, present, kind, user_deleted, user_deleted_at";
 
 } // namespace
 
@@ -1185,6 +1204,77 @@ int SqliteRepository::countAssignments(const QString &courseId) const
         return 0;
     }
     return query.value(0).toInt();
+}
+
+// ---------------------------------------------------------------------------
+// 用户手动软删除（v5）
+// ---------------------------------------------------------------------------
+
+bool SqliteRepository::setAssignmentUserDeleted(const QString &courseId, const QString &sourceId,
+                                                bool deleted, QString *error, bool *found)
+{
+    const auto fail = [&](const QString &message) {
+        d->lastError = message;
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    // 行必须存在（避免"删了一条其实不存在的记录"这种静默假成功）
+    QSqlQuery exists(d->db);
+    exists.prepare(QStringLiteral(
+        "SELECT COUNT(*) FROM assignments WHERE course_id = :c AND source_id = :s"));
+    exists.bindValue(QStringLiteral(":c"), courseId);
+    exists.bindValue(QStringLiteral(":s"), sourceId);
+    if (!exists.exec() || !exists.next()) {
+        return fail(QStringLiteral("查询作业失败：%1").arg(exists.lastError().text()));
+    }
+    if (exists.value(0).toInt() <= 0) {
+        if (found != nullptr) {
+            *found = false;
+        }
+        return fail(QStringLiteral("作业不存在（可能在最近一次同步中被移除）"));
+    }
+
+    QSqlQuery update(d->db);
+    if (deleted) {
+        // 幂等：已经删除过的不覆盖原删除时间
+        update.prepare(QStringLiteral(
+            "UPDATE assignments SET user_deleted = 1, user_deleted_at = :at"
+            " WHERE course_id = :c AND source_id = :s AND user_deleted = 0"));
+        update.bindValue(QStringLiteral(":at"), timeutil::toStorage(timeutil::nowUtc()));
+    } else {
+        update.prepare(QStringLiteral(
+            "UPDATE assignments SET user_deleted = 0, user_deleted_at = NULL"
+            " WHERE course_id = :c AND source_id = :s AND user_deleted = 1"));
+    }
+    update.bindValue(QStringLiteral(":c"), courseId);
+    update.bindValue(QStringLiteral(":s"), sourceId);
+    if (!update.exec()) {
+        return fail(QStringLiteral("写入软删除标记失败：%1").arg(update.lastError().text()));
+    }
+    return true;
+}
+
+QList<Assignment> SqliteRepository::listUserDeletedAssignments() const
+{
+    QList<Assignment> out;
+    QSqlQuery query(d->db);
+    // 只列"用户删了、且站点上还在"的记录：
+    // 站点已经不存在的（present=0）不属于回收站范畴，恢复回去也无处可显示。
+    query.prepare(QStringLiteral(
+        "SELECT %1 FROM assignments WHERE user_deleted = 1 AND present = 1"
+        " ORDER BY (user_deleted_at IS NULL), user_deleted_at DESC, title")
+            .arg(QString::fromLatin1(kAssignmentColumns)));
+    if (!query.exec()) {
+        d->lastError = query.lastError().text();
+        return out;
+    }
+    while (query.next()) {
+        out.append(assignmentFromQuery(query));
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------

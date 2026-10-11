@@ -99,4 +99,22 @@ WebActionResult WebApi::purgeData(const QString &confirm)
     });
 }
 
+WebActionResult WebApi::deleteAssignment(const QString &courseId, const QString &sourceId)
+{
+    return run([this, courseId, sourceId]() {
+        return m_sources.deleteAssignment != nullptr
+                   ? m_sources.deleteAssignment(courseId, sourceId)
+                   : WebActionResult{false, 501, QStringLiteral("未实现"), {}};
+    });
+}
+
+WebActionResult WebApi::restoreAssignment(const QString &courseId, const QString &sourceId)
+{
+    return run([this, courseId, sourceId]() {
+        return m_sources.restoreAssignment != nullptr
+                   ? m_sources.restoreAssignment(courseId, sourceId)
+                   : WebActionResult{false, 501, QStringLiteral("未实现"), {}};
+    });
+}
+
 } // namespace njulms

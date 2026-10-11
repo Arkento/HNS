@@ -28,6 +28,17 @@
   --radius-control: 0.625rem;
   --tap: 2.75rem;          /* ≥44px */
   --base: 17px;            /* 字号基准，由 app.js 覆盖 */
+
+  /* 动画规范（与 app.js 里的 MOTION 常量一一对应，改一处要同步另一处）：
+     时长按"交互→条目→布局→页面"递增；缓动只有两条，避免各组件各写一套。
+     条目退出/入场、布局重排（FLIP）由 app.js 的 Web Animations API 执行，
+     这里只负责按压反馈与开关等纯 CSS 过渡。 */
+  --dur-press: 90ms;       /* 按钮按压（80–140ms） */
+  --dur-item: 240ms;       /* 列表条目增删（180–280ms） */
+  --dur-layout: 280ms;     /* 卡片重排 FLIP（220–350ms） */
+  --dur-page: 260ms;       /* tab 切换（250–400ms） */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -133,7 +144,14 @@ body {
   font-size: 0.94rem;
   font-weight: 600;
   cursor: pointer;
+  /* 按压反馈与选中态都做过渡：切换 tab 不再是"啪"地换色 */
+  transition: transform var(--dur-press) var(--ease-out),
+              background-color 160ms var(--ease-out),
+              color 160ms var(--ease-out),
+              border-color 160ms var(--ease-out);
 }
+
+.tab:active { transform: scale(0.97); }
 
 .tab[aria-selected="true"] {
   background: var(--accent-soft);
@@ -207,9 +225,14 @@ main {
 .facts dt { flex: 0 0 5.5rem; color: var(--muted); font-size: 0.82rem; }
 .facts dd { margin: 0; font-size: 0.82rem; word-break: break-word; }
 
-/* ---------- 卡片列表（未提交 / 已提交）---------- */
+/* ---------- 卡片列表（未提交 / 已提交 / 已删除）---------- */
 
-.cards { display: grid; gap: 0.6rem; }
+/* 条目间距用 margin-bottom 而不是 grid gap：
+   删除退场动画要把"高度 + 下方间距"一起收到 0，gap 是容器级的、动画不到，
+   收尾时会留下一个间隙的跳变；margin 才能让邻居全程连续地补位。 */
+.cards { display: grid; }
+.cards > .item { margin-bottom: 0.6rem; }
+.cards > .item:last-child { margin-bottom: 0; }
 .cards .empty { margin: 0; padding: 1.5rem 0; text-align: center; color: var(--muted); }
 
 .item {
@@ -218,6 +241,9 @@ main {
   border-radius: var(--radius-card);
   overflow: hidden;
 }
+
+/* 正在播放删除/恢复退场动画：不再接受任何点击（防重复触发） */
+.item.leaving { pointer-events: none; }
 
 .item.open { border-color: var(--accent); }
 
@@ -246,22 +272,52 @@ main {
 
 .item-toggle:active { background: var(--surface-alt); }
 
-/* 跳转到原站详情页（Safari）。独立点击区，不与「展开」冲突 */
-.item-jump {
+/* 卡片行尾的独立点击区（跳原站↗ / 删除🗑）：不与「展开」冲突，≥44px 触摸区 */
+.item-jump, .item-del {
   flex: 0 0 auto;
   align-self: stretch;
   width: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform var(--dur-press) var(--ease-out),
+              background-color 140ms var(--ease-out);
+}
+
+.item-jump { color: var(--accent); font-size: 1.15rem; }
+.item-jump:active { background: var(--accent-soft); }
+.item-jump[disabled] { color: var(--muted); opacity: 0.4; }
+
+.item-del { color: var(--danger); }
+.item-del svg { width: 1.25rem; height: 1.25rem; }
+.item-del:active { background: var(--danger-soft); }
+
+/* 「已删除」tab 行尾的恢复按钮（文字按钮，动作方向是"放回去"，用强调色） */
+.item-restore {
+  flex: 0 0 auto;
+  align-self: stretch;
+  padding: 0 0.9rem;
   border: 0;
   border-left: 1px solid var(--border);
   background: transparent;
   color: var(--accent);
-  font-size: 1.15rem;
-  line-height: 1;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
   cursor: pointer;
+  transition: transform var(--dur-press) var(--ease-out),
+              background-color 140ms var(--ease-out);
 }
+.item-restore:active { background: var(--accent-soft); }
 
-.item-jump:active { background: var(--accent-soft); }
-.item-jump[disabled] { color: var(--muted); opacity: 0.4; }
+/* 图标按钮的按压反馈：轻微缩小（iOS 按钮的经典手感） */
+.item-jump:active, .item-del:active, .item-restore:active { transform: scale(0.94); }
 
 .item-main { flex: 1; min-width: 0; display: grid; gap: 0.2rem; }
 .item-title { font-weight: 600; word-break: break-word; }
@@ -392,11 +448,16 @@ main {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
+  transition: transform var(--dur-press) var(--ease-out),
+              filter 140ms var(--ease-out);
 }
 
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 .btn-danger { background: transparent; border-color: var(--danger); color: var(--danger); }
-.btn-plain:active, .btn-primary:active, .btn-danger:active { filter: brightness(0.94); }
+.btn-plain:active, .btn-primary:active, .btn-danger:active {
+  filter: brightness(0.94);
+  transform: scale(0.97);
+}
 .btn-plain:disabled, .btn-primary:disabled, .btn-danger:disabled { opacity: 0.45; }
 
 /* 刷新按钮的反馈：转圈 → 已刷新（绿）/ 刷新失败（红） */
@@ -499,7 +560,13 @@ main {
   font: inherit;
   font-size: 0.82rem;
   cursor: pointer;
+  transition: transform var(--dur-press) var(--ease-out),
+              background-color 160ms var(--ease-out),
+              color 160ms var(--ease-out),
+              border-color 160ms var(--ease-out);
 }
+
+.segmented button:active { transform: scale(0.97); }
 
 .segmented button[aria-pressed="true"] {
   background: var(--accent-soft);
@@ -578,9 +645,28 @@ main {
   font-weight: 600;
   box-shadow: 0 0.4rem 1.2rem rgba(0, 0, 0, 0.25);
   z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
 }
 
 .toast.error { background: var(--danger); color: #fff; }
+
+/* 可撤销的提示：右侧一个"撤销"动作按钮（如删除后 6 秒内可撤销） */
+.toast-action {
+  flex-shrink: 0;
+  min-height: 2.2rem;
+  padding: 0 0.2rem;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.toast.error .toast-action { color: #fff; }
+.toast-action:active { opacity: 0.6; }
 
 /* 兜底提示（脚本没加载成功时显示） */
 .boot-note {
@@ -619,4 +705,13 @@ main {
   .progress-fill, .collapse, .chev, .switch-row input[type="checkbox"],
   .switch-row input[type="checkbox"]::after { transition: none; }
   .spinner { animation: none; }
+  /* 按压反馈、tab/按钮状态过渡一律取消（app.js 里的条目增删/FLIP 动画
+     由 motionQuery 判断后直接跳过） */
+  .tab, .btn-plain, .btn-primary, .btn-danger, .segmented button,
+  .item-jump, .item-del, .item-restore {
+    transition: none;
+  }
+  .tab:active, .btn-plain:active, .btn-primary:active, .btn-danger:active,
+  .segmented button:active, .item-jump:active, .item-del:active,
+  .item-restore:active { transform: none; }
 }

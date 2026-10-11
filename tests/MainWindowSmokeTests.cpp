@@ -5,13 +5,21 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QSettings>
 #include <QSpinBox>
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QUrl>
 #include <QWidget>
 
 #include <cstdlib>
@@ -259,6 +267,115 @@ private slots:
             QVERIFY(enabled->isChecked());
             QCOMPARE(minutes->value(), kChosenInterval);
         }
+    }
+
+    /// 同步 GET（等待期间照常跑事件循环：WebApi 需要主线程处理投递）
+    static QPair<int, QByteArray> httpGet(quint16 port, const QString &path)
+    {
+        QNetworkAccessManager manager;
+        QNetworkRequest request(
+            QUrl(QStringLiteral("http://127.0.0.1:%1%2").arg(port).arg(path)));
+        QNetworkReply *reply = manager.get(request);
+        QEventLoop loop;
+        QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        loop.exec();
+        const QByteArray body = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+        return {status, body};
+    }
+
+    /// 同步 POST：可选带访问令牌
+    static QPair<int, QByteArray> httpPost(quint16 port, const QString &path,
+                                           const QByteArray &body, const QByteArray &token)
+    {
+        QNetworkAccessManager manager;
+        QNetworkRequest request(
+            QUrl(QStringLiteral("http://127.0.0.1:%1%2").arg(port).arg(path)));
+        request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        if (!token.isEmpty()) {
+            request.setRawHeader("X-Auth-Token", token);
+        }
+        QNetworkReply *reply = manager.post(request, body);
+        QEventLoop loop;
+        QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        loop.exec();
+        const QByteArray response = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        reply->deleteLater();
+        return {status, response};
+    }
+
+    /**
+     * v5：软删除端到端——真实 HTTP 接口 → MainWindow → SQLite → scope 过滤。
+     *
+     * 覆盖链路：未提交列表少一条 → 回收站（scope=deleted）多一条（带删除时间）→
+     * 恢复 → 两边一起还原。写接口不带令牌必须 401（与其它写操作一致）。
+     */
+    void softDeleteEndToEndOverHttp()
+    {
+        // 固定端口：必须在构造 MainWindow 之前设置（避免撞上默认端口/正在跑的真实实例）
+        constexpr quint16 kPort = 45817;
+        const QByteArray previousPort = qgetenv("NJULMS_WEB_PORT");
+        qputenv("NJULMS_WEB_PORT", QByteArray::number(kPort));
+
+        MainWindow window;
+
+        // 访问令牌由 MainWindow 启动时生成并写入 QSettings（测试里已重定向到临时 INI）
+        QSettings settings(QStringLiteral("NjuLmsCrawler"), QStringLiteral("NjuLmsCrawler"));
+        const QByteArray token =
+            settings.value(QStringLiteral("web/token")).toString().toUtf8();
+        QVERIFY(!token.isEmpty());
+
+        const auto fetchScope = [](const QString &scope) {
+            const auto response =
+                httpGet(45817, QStringLiteral("/api/assignments?scope=%1").arg(scope));
+            if (response.first != 200) {
+                qWarning("scope=%s 返回 %d", qPrintable(scope), response.first);
+            }
+            return QJsonDocument::fromJson(response.second)
+                .object()
+                .value(QStringLiteral("data"))
+                .toArray();
+        };
+
+        const QJsonArray pendingBefore = fetchScope(QStringLiteral("pending"));
+        QVERIFY2(pendingBefore.size() >= 1, "种子数据里应有未提交作业");
+        const QJsonObject row = pendingBefore.first().toObject();
+        const QString courseId = row.value(QStringLiteral("courseId")).toString();
+        const QString sourceId = row.value(QStringLiteral("sourceId")).toString();
+        QVERIFY(!courseId.isEmpty());
+        QVERIFY(!sourceId.isEmpty());
+
+        QJsonObject body;
+        body.insert(QStringLiteral("courseId"), courseId);
+        body.insert(QStringLiteral("sourceId"), sourceId);
+        const QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+
+        // 写接口必须带令牌
+        QCOMPARE(httpPost(45817, QStringLiteral("/api/assignments/delete"), payload, QByteArray())
+                     .first,
+                 401);
+
+        // 删除：未提交 -1、回收站 +1（且带"删除于"时间）
+        QCOMPARE(httpPost(45817, QStringLiteral("/api/assignments/delete"), payload, token).first,
+                 200);
+        QCOMPARE(fetchScope(QStringLiteral("pending")).size(), pendingBefore.size() - 1);
+        const QJsonArray deletedAfter = fetchScope(QStringLiteral("deleted"));
+        QCOMPARE(deletedAfter.size(), 1);
+        QVERIFY(deletedAfter.first().toObject().contains(QStringLiteral("deletedAt")));
+        QCOMPARE(deletedAfter.first().toObject().value(QStringLiteral("sourceId")).toString(),
+                 sourceId);
+
+        // 恢复：两边还原
+        QCOMPARE(httpPost(45817, QStringLiteral("/api/assignments/restore"), payload, token).first,
+                 200);
+        QCOMPARE(fetchScope(QStringLiteral("pending")).size(), pendingBefore.size());
+        QCOMPARE(fetchScope(QStringLiteral("deleted")).size(), 0);
+
+        qputenv("NJULMS_WEB_PORT", previousPort);
     }
 };
 
