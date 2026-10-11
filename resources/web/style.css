@@ -279,7 +279,11 @@ main {
   gap: 0.5rem;
   font-size: 0.92rem;
   font-weight: 700;
+  transition: transform 140ms var(--ease-out);
 }
+
+/* 滑过触发线 = "松手就删"：动作区内容放大一点作为确认（防误删的关键反馈） */
+.swipe-backing.armed .swipe-backing-label { transform: scale(1.12); }
 
 .swipe-backing svg { width: 1.3rem; height: 1.3rem; }
 
@@ -748,4 +752,5 @@ main {
   }
   .tab:active, .btn-plain:active, .btn-primary:active, .btn-danger:active,
   .segmented button:active, .item-jump:active, .item-restore:active { transform: none; }
+  .swipe-backing-label { transition: none; }
 }

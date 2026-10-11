@@ -1231,6 +1231,7 @@ function restoreAfterFly(card, wrap, geo) {
   const backing = wrap ? wrap.querySelector('.swipe-backing') : null;
   if (backing) {
     backing.style.opacity = '0';
+    backing.classList.remove('armed');
   }
   if (reduceMotion()) {
     card.style.transform = '';
@@ -1253,23 +1254,23 @@ function restoreAfterFly(card, wrap, geo) {
 // ---------------------------------------------------------------------------
 // 左滑删除手势（Pointer Events）
 //
-// 目标手感（用户指定）：跟手带阻尼、松手不过线就回弹、过线才触发删除。
+// 目标手感（用户指定）：跟手带阻尼、松手不过线就回弹、**滑过触发线才**触发删除。
+// 刻意不做"快速甩动也能删"的捷径：手指轻轻一甩不该把东西删掉——
+// 触发条件只有"真实滑动距离 ≥ 触发线"一条，过线时红色动作区放大作为"已到位"确认。
 // 用 Pointer Events 而不是 Touch Events：同一套代码同时覆盖触屏与鼠标（PC 预览）。
 // `.swipe { touch-action: pan-y }` 把竖向滚动完全留给浏览器（一旦判定竖向就
 // 安全退出），横向手势才会作为 pointermove 流交给我们，不需要 preventDefault。
 // ---------------------------------------------------------------------------
 
 const SWIPE = {
-  engage: 8,             // 横向位移超过它才判定"在左滑"（轻点/竖向滚动不受影响）
-  flingVelocity: 0.5,    // px/ms：快速甩动可以少滑一点就触发
-  flingMinDistance: 48,  // 但至少滑过这么远（避免轻扫误删）
-  maxOverdrag: 110,      // 越过触发线之后还能再拉出的最大距离（阻尼段）
+  engage: 15,            // 横向位移超过它才判定"在左滑"（轻点/竖向滚动不受影响）
+  maxOverdrag: 220,      // 越过触发线之后还能再拉出的最大距离（阻尼段）
 };
 
-/// 触发删除所需的滑动距离：卡片宽度的 32%，夹在 [96, 240] px
+/// 触发删除所需的滑动距离：卡片宽度的 40%，夹在 [96, 240] px
 function swipeTriggerDistance(card) {
   const width = card.getBoundingClientRect().width;
-  return Math.min(240, Math.max(96, width * 0.32));
+  return Math.min(240, Math.max(96, width * 0.4));
 }
 
 /// 阻尼曲线：触发线以内 1:1 跟手；越线后指数逼近 +maxOverdrag（越拉越重）
@@ -1284,6 +1285,7 @@ function swipeResetVisual(swipe) {
   swipe.card.style.transform = '';
   if (swipe.backing) {
     swipe.backing.style.opacity = '0';
+    swipe.backing.classList.remove('armed');
   }
 }
 
@@ -1309,9 +1311,6 @@ function onPendingPointerDown(event) {
     pointerId: event.pointerId,
     startX: event.clientX,
     startY: event.clientY,
-    lastX: event.clientX,
-    lastT: performance.now(),
-    velocity: 0,
     raw: 0,
     offset: 0,
     dragging: false,
@@ -1343,19 +1342,14 @@ function onPendingPointerMove(event) {
     swipe.wrap.classList.add('dragging');
   }
 
-  const now = performance.now();
-  const dt = Math.max(1, now - swipe.lastT);
-  // 指数平滑的速度估计（正值 = 向左甩）
-  swipe.velocity = 0.7 * swipe.velocity + 0.3 * ((swipe.lastX - event.clientX) / dt);
-  swipe.lastX = event.clientX;
-  swipe.lastT = now;
-
   swipe.raw = Math.max(0, swipe.startX - event.clientX);
   const trigger = swipeTriggerDistance(swipe.card);
   swipe.offset = dampedOffset(swipe.raw, trigger);
   swipe.card.style.transform = `translateX(${-swipe.offset.toFixed(1)}px)`;
   if (swipe.backing) {
     swipe.backing.style.opacity = String(Math.min(1, (swipe.offset / trigger) * 1.2));
+    // 滑过触发线 = "已到位，松手就删"：红色动作区放大一点作为确认信号
+    swipe.backing.classList.toggle('armed', swipe.raw >= trigger);
   }
 }
 
@@ -1371,9 +1365,9 @@ function onPendingPointerUp(event) {
   swipe.wrap.classList.remove('dragging');
   suppressClickUntil = performance.now() + 350;   // 拖动后的 click 一律吞掉
 
-  const trigger = swipeTriggerDistance(swipe.card);
-  const fling = swipe.velocity > SWIPE.flingVelocity && swipe.raw > SWIPE.flingMinDistance;
-  if (swipe.raw >= trigger || fling) {
+  // 触发条件只有一条：真实滑动距离达到触发线。
+  // 刻意不做"快速甩动也能删"的捷径——手指轻轻一甩不该把东西删掉。
+  if (swipe.raw >= swipeTriggerDistance(swipe.card)) {
     deletePendingItem(swipe.card, swipe.card.dataset.key, { startOffset: swipe.offset });
     return;
   }
