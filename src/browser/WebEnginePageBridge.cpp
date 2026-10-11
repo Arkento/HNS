@@ -31,19 +31,6 @@ constexpr auto kOrigin = "https://lms.nju.edu.cn";
 constexpr auto kHomeUrl = "https://lms.nju.edu.cn/user/index#/";
 
 /**
- * 首页地址。默认是智汇南雍；设置环境变量 NJULMS_HOME_URL 可以换成别的站点。
- *
- * 用途：接入新站点前先做"真机探测"——把它当首页打开、人工登录一次，
- * 再用远程调试抓真实接口（cookie 会留在同一个持久化 Profile 里）。
- * 只影响 loadHome()，站点相对路径（loadPath）仍以南大 LMS 为基准，行为不变。
- */
-QString homeUrl()
-{
-    const QByteArray override = qgetenv("NJULMS_HOME_URL");
-    return override.isEmpty() ? QString::fromLatin1(kHomeUrl) : QString::fromLocal8Bit(override);
-}
-
-/**
  * 进程级的 Profile 缓存：同一个存储路径只允许一个 QWebEngineProfile。
  *
  * ⚠️ 这是实测踩到的硬约束，不是优化：
@@ -100,9 +87,9 @@ QWebEngineProfile *acquireSharedProfile(const QString &storagePath, bool *create
     return profile;
 }
 
-/// 认证相关主机。用于判断是否停留在登录流程中。
-/// 这三个主机来自 doc/login.md 实测的三段式认证链。
-const QStringList &authHosts()
+/// 智汇南雍的认证相关主机（默认站点配置）。用于判断是否停留在登录流程中。
+/// 来自 doc/login.md 实测的三段式认证链。
+const QStringList &defaultAuthHosts()
 {
     static const QStringList hosts = {
         QStringLiteral("authserver.nju.edu.cn"),
@@ -175,6 +162,26 @@ public:
     QString channelScript;
     QString wrapperScript;
     bool scriptsLoaded = false;
+
+    // ---- 站点配置（默认智汇南雍；见 setSiteConfig）--------------------------
+    QString origin = QString::fromLatin1(kOrigin);
+    /// 为空表示用默认首页（含 NJULMS_HOME_URL 覆盖，便于真机探测）
+    QString configuredHomeUrl;
+    QStringList authHosts = defaultAuthHosts();
+
+    /**
+     * 实际首页地址：自定义站点用配置值；默认站点保留 NJULMS_HOME_URL 覆盖
+     * （该环境变量只影响首页，用于接入新站点前的真机探测）。
+     */
+    QString effectiveHomeUrl() const
+    {
+        if (!configuredHomeUrl.isEmpty()) {
+            return configuredHomeUrl;
+        }
+        const QByteArray override = qgetenv("NJULMS_HOME_URL");
+        return override.isEmpty() ? QString::fromLatin1(kHomeUrl)
+                                  : QString::fromLocal8Bit(override);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -230,7 +237,7 @@ WebEnginePageBridge::WebEnginePageBridge(QObject *parent)
         emit safeUrlChanged(safe);
 
         const QString host = url.host();
-        if (authHosts().contains(host)) {
+        if (d->authHosts.contains(host)) {
             emit loginPageReached();
             qCInfo(lcBrowser) << "reached authentication host; waiting for manual login";
         }
@@ -261,6 +268,18 @@ WebEnginePageBridge::~WebEnginePageBridge()
     // view 没有父对象，需要手工释放
     delete d->view;
     d->view = nullptr;
+}
+
+void WebEnginePageBridge::setSiteConfig(const SiteConfig &config)
+{
+    if (config.origin.isEmpty()) {
+        qCWarning(lcBrowser) << "ignoring empty site origin";
+        return;
+    }
+    d->origin = config.origin;
+    d->configuredHomeUrl = config.homeUrl.isEmpty() ? config.origin : config.homeUrl;
+    d->authHosts = config.authHosts;
+    qCInfo(lcBrowser) << "site config set; origin:" << config.origin;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +398,7 @@ bool WebEnginePageBridge::initialize(const QString &profileDir, QString *error)
     connect(d->page, &QWebEnginePage::urlChanged, this, [this](const QUrl &url) {
         emit safeUrlChanged(redact::url(url));
         const QString host = url.host();
-        if (authHosts().contains(host)) {
+        if (d->authHosts.contains(host)) {
             emit loginPageReached();
         }
     });
@@ -407,8 +426,8 @@ void WebEnginePageBridge::loadPath(const QString &path)
     if (d->page == nullptr) {
         return;
     }
-    const QUrl url = path.isEmpty() ? QUrl(homeUrl())
-                                    : QUrl(QString::fromLatin1(kOrigin) + path);
+    const QUrl url = path.isEmpty() ? QUrl(d->effectiveHomeUrl())
+                                    : QUrl(d->origin + path);
     qCInfo(lcBrowser) << "navigating to" << redact::url(url);
     d->page->setUrl(url);
 }
@@ -419,7 +438,8 @@ bool WebEnginePageBridge::looksAuthenticated() const
         return false;
     }
     const QUrl url = d->page->url();
-    return url.host() == QLatin1String("lms.nju.edu.cn") && !isOnAuthHost();
+    const QUrl home(d->effectiveHomeUrl());
+    return !home.host().isEmpty() && url.host() == home.host() && !isOnAuthHost();
 }
 
 bool WebEnginePageBridge::isOnAuthHost() const
@@ -427,7 +447,7 @@ bool WebEnginePageBridge::isOnAuthHost() const
     if (d->page == nullptr) {
         return false;
     }
-    return authHosts().contains(d->page->url().host());
+    return d->authHosts.contains(d->page->url().host());
 }
 
 QString WebEnginePageBridge::currentUrl() const

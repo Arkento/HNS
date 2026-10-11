@@ -137,6 +137,14 @@ private:
     /// 当前库里 present 的学习通课程数（登录状态文案用）
     int countChaoxingPresentCourses() const;
 
+    // ---- 雨课堂（yuketang.cn）----
+
+    /// 创建雨课堂的站点页面桥与登录窗口（阶段 0：人工登录）
+    void setupYuketang();
+
+    /// 显示雨课堂登录窗口
+    void showYuketangLoginWindow(const QString &reason = QString());
+
     /// 读取界面上的定时周期设置
     int configuredIntervalMinutes() const;
 

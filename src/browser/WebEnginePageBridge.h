@@ -4,6 +4,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 
 #include <memory>
@@ -45,6 +46,23 @@ class WebEnginePageBridge : public IPageBridge
 public:
     explicit WebEnginePageBridge(QObject *parent = nullptr);
     ~WebEnginePageBridge() override;
+
+    /**
+     * 站点配置：默认智汇南雍。
+     *
+     * 接入新站点（如雨课堂）时，用同一套"页面上下文同源请求"能力即可——
+     * 在 initialize() 之前 setSiteConfig() 一次，首页地址、相对路径基准与
+     * 认证主机判定都会跟着走；不调用则保持原有行为（南大 LMS）。
+     */
+    struct SiteConfig
+    {
+        QString origin;         ///< 同源基准：相对路径请求都拼在它后面
+        QString homeUrl;        ///< 首页 / 登录入口
+        QStringList authHosts;  ///< 认证主机：进入这些主机视为"停留在登录流程"
+    };
+
+    /// 设置站点配置（必须在 initialize() 之前调用）
+    void setSiteConfig(const SiteConfig &config);
 
     /// 创建（或复用）持久化 Profile。profileDir 为空时使用 defaultProfileDir()。
     /// 必须在 loadHome() 之前调用。

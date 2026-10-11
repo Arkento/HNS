@@ -404,6 +404,8 @@ public:
     /// 学习通（超星）：页面驱动采集，与主页面共享同一个持久化 Profile
     std::unique_ptr<ChaoxingAdapter> chaoxing;
     std::unique_ptr<ChaoxingSyncRunner> chaoxingSync;
+    /// 雨课堂（yuketang.cn）：独立的站点页面桥（Cookie+JSON，见 setupYuketang）
+    std::unique_ptr<WebEnginePageBridge> yuketangBridge;
 
     // 界面
     QTabWidget *tabs = nullptr;
@@ -449,6 +451,10 @@ public:
     LoginWindow *loginWindow = nullptr;
     /// 学习通登录窗口（扫码后才弹出；登录成功后自动隐藏）
     LoginWindow *chaoxingLoginWindow = nullptr;
+    /// 雨课堂登录状态行与登录窗口（阶段 0：先支持人工登录，采集随后接入）
+    QLabel *yuketangAuthStatus = nullptr;
+    QPushButton *openYuketangButton = nullptr;
+    LoginWindow *yuketangLoginWindow = nullptr;
 
     // 日志标签页
     QPlainTextEdit *logView = nullptr;
@@ -540,6 +546,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     // ---- 学习通（超星）：适配器 + 同步运行器（与主页面共享持久化 Profile）----
     setupChaoxing();
+
+    // ---- 雨课堂：独立的站点页面桥（阶段 0：先支持人工登录）----
+    setupYuketang();
 
     // ---- 启动状态检查：识别上次未完成的任务与是否需要补一次同步 ----
     QString startupSummary;
@@ -1207,6 +1216,17 @@ void MainWindow::buildUi()
     chaoxingAuthRow->addWidget(d->openChaoxingButton);
     chaoxingAuthRow->addWidget(d->checkChaoxingButton);
     authLayout->addLayout(chaoxingAuthRow);
+
+    // 第三行：雨课堂（与上面两行同样的格式）
+    auto *yuketangAuthRow = new QHBoxLayout();
+    d->yuketangAuthStatus = new QLabel(QStringLiteral("未检查（登录后可采集）"), authGroup);
+    setLabelState(d->yuketangAuthStatus, "unknown");
+    yuketangAuthRow->addWidget(new QLabel(QStringLiteral("雨课堂："), authGroup));
+    yuketangAuthRow->addWidget(d->yuketangAuthStatus);
+    yuketangAuthRow->addStretch();
+    d->openYuketangButton = new QPushButton(QStringLiteral("打开雨课堂并登录"), authGroup);
+    yuketangAuthRow->addWidget(d->openYuketangButton);
+    authLayout->addLayout(yuketangAuthRow);
 
     leftColumn->addWidget(authGroup);
 
@@ -2360,6 +2380,73 @@ int MainWindow::countChaoxingPresentCourses() const
         }
     }
     return count;
+}
+
+// ---------------------------------------------------------------------------
+// 雨课堂（yuketang.cn）
+// ---------------------------------------------------------------------------
+
+/**
+ * 创建雨课堂的站点页面桥与登录窗口（阶段 0）。
+ *
+ * 为什么走"页面桥"而不是像学习通那样写页面状态机：雨课堂的业务接口是
+ * **Cookie + JSON**（探测报告 docs/07），页面上下文里的同源 fetch 拿到的就是
+ * 结构化数据，不需要任何 HTML 解析；桥接刚刚已泛化成可配置站点。
+ *
+ * 本阶段只做一件事：让用户能在程序内置浏览器里完成一次人工登录
+ * （Cookie 持久化在共享 Profile 里），随后用远程调试抓取作业/考试接口定稿。
+ */
+void MainWindow::setupYuketang()
+{
+    WebEnginePageBridge::SiteConfig config;
+    config.origin = QStringLiteral("https://www.yuketang.cn");
+    config.homeUrl = QStringLiteral("https://www.yuketang.cn/v2/web/index");
+    // 登录页与业务同主机（/web/?next=...），登录状态由接口响应判定（401002），
+    // 因此没有独立的"认证主机"列表。
+    config.authHosts = {};
+
+    d->yuketangBridge = std::make_unique<WebEnginePageBridge>();
+    d->yuketangBridge->setSiteConfig(config);
+    QString error;
+    if (!d->yuketangBridge->initialize(QString(), &error)) {
+        appendLog(QStringLiteral("雨课堂页面初始化失败：%1").arg(error), true);
+    } else if (!qEnvironmentVariableIsSet("NJULMS_DISABLE_AUTO_OPEN")) {
+        // 后台预加载登录页：用户点按钮时页面已经就绪（隐藏窗口，不会打扰）
+        d->yuketangBridge->loadHome();
+    }
+
+    d->yuketangLoginWindow = new LoginWindow(this);
+    d->yuketangLoginWindow->setWindowTitle(
+        QStringLiteral("登录 · 雨课堂（完成后窗口可关闭）"));
+    {
+        auto *layout = new QVBoxLayout(d->yuketangLoginWindow);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->addWidget(d->yuketangBridge->view());
+    }
+
+    connect(d->openYuketangButton, &QPushButton::clicked, this, [this]() {
+        if (d->yuketangBridge == nullptr) {
+            return;
+        }
+        d->yuketangBridge->loadHome();
+        showYuketangLoginWindow(
+            QStringLiteral("已打开雨课堂：请扫码或账号登录（首次使用需关注公众号），完成后可关闭窗口。"));
+    });
+}
+
+void MainWindow::showYuketangLoginWindow(const QString &reason)
+{
+    if (d->yuketangLoginWindow == nullptr) {
+        return;
+    }
+    const bool alreadyVisible = d->yuketangLoginWindow->isVisible();
+    if (!alreadyVisible && !reason.isEmpty()) {
+        appendLog(reason);
+        statusBar()->showMessage(reason, 20000);
+    }
+    d->yuketangLoginWindow->show();
+    d->yuketangLoginWindow->raise();
+    d->yuketangLoginWindow->activateWindow();
 }
 
 /**
