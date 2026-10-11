@@ -36,6 +36,8 @@ public:
         QString path;            ///< 同源路径，例如 "/api/my-courses"（不含主机名）
         Method method = Method::Get;
         QString jsonBody;        ///< POST 时的 JSON 请求体；GET 时为空
+        /// 额外的请求头。默认空；雨课堂等站点要求自定义头（如 `xtbz: ykt`）时使用。
+        QList<QPair<QString, QString>> extraHeaders;
 
         static Request get(const QString &path) { return Request{path, Method::Get, QString()}; }
         static Request post(const QString &path, const QString &jsonBody)

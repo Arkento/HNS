@@ -26,6 +26,7 @@ namespace source_keys {
 
 constexpr QStringView kNjuLms = u"nju-lms";      ///< 智汇南雍（南京大学 LMS）
 constexpr QStringView kChaoxing = u"chaoxing";   ///< 学习通（超星）
+constexpr QStringView kYuketang = u"yuketang";   ///< 雨课堂（学堂在线）
 
 } // namespace source_keys
 

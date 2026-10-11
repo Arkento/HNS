@@ -145,6 +145,18 @@ private:
     /// 显示雨课堂登录窗口
     void showYuketangLoginWindow(const QString &reason = QString());
 
+    /// 学习通结束后串行触发雨课堂采集
+    void maybeStartYuketangSync();
+
+    /// 雨课堂采集是否正在运行
+    bool yuketangBusy() const;
+
+    /// 「检查雨课堂登录」：只取课程列表判断会话
+    void checkYuketangSession();
+
+    /// 当前库里 present 的雨课堂课程数（登录状态文案用）
+    int countYuketangPresentCourses() const;
+
     /// 读取界面上的定时周期设置
     int configuredIntervalMinutes() const;
 

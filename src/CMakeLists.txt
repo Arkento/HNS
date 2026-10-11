@@ -15,12 +15,16 @@ add_library(njulms_core STATIC
     parser/AssignmentParser.h
     parser/ChaoxingParser.cpp
     parser/ChaoxingParser.h
+    parser/YuketangParser.cpp
+    parser/YuketangParser.h
 
     repository/SqliteRepository.cpp
     repository/SqliteRepository.h
 
     sync/SyncManager.cpp
     sync/SyncManager.h
+    sync/YuketangSyncRunner.cpp
+    sync/YuketangSyncRunner.h
 
     scheduler/Scheduler.cpp
     scheduler/Scheduler.h
@@ -31,6 +35,8 @@ add_library(njulms_core STATIC
     adapters/IPageBridge.h
     adapters/NjuLmsAdapter.cpp
     adapters/NjuLmsAdapter.h
+    adapters/YuketangAdapter.cpp
+    adapters/YuketangAdapter.h
 
     utils/Logger.cpp
     utils/Logger.h

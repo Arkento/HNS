@@ -37,6 +37,7 @@ endfunction()
 
 njulms_add_test(AssignmentParserTests)
 njulms_add_test(ChaoxingParserTests support/ChaoxingFixtures.cpp)
+njulms_add_test(YuketangParserTests support/YuketangFixtures.cpp)
 njulms_add_test(AuthManagerTests)
 njulms_add_test(PaginationTests)
 njulms_add_test(RepositoryTests)

@@ -562,7 +562,7 @@ QString WebEnginePageBridge::requestScript()
         "    });\n"
         "  };\n"
         "\n"
-        "  window.__njulmsRequest = function (id, path, method, body) {\n"
+        "  window.__njulmsRequest = function (id, path, method, body, headers) {\n"
         "    window.__njulmsAwaitChannel().then(function (ready) {\n"
         "      var send = function (payload) {\n"
         "        if (!ready) { return; }\n"
@@ -582,6 +582,21 @@ QString WebEnginePageBridge::requestScript()
         "        credentials: 'same-origin',\n"
         "        headers: { 'Accept': 'application/json, text/plain, */*' }\n"
         "      };\n"
+        "      if (headers) {\n"
+        "        for (var name in headers) {\n"
+        "          if (Object.prototype.hasOwnProperty.call(headers, name)) {\n"
+        "            options.headers[name] = headers[name];\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        // 站点（如雨课堂）的写接口要求 X-CSRFToken，且它自己的 axios 是全局自动附带。
+        // 这里读同源 Cookie 里的 csrftoken 自动补上（读不到就跳过，不影响其它站点）。
+        "      try {\n"
+        "        var csrfMatch = document.cookie.match(/(?:^|;\\s*)csrftoken=([^;]+)/);\n"
+        "        if (csrfMatch && !options.headers['X-CSRFToken']) {\n"
+        "          options.headers['X-CSRFToken'] = csrfMatch[1];\n"
+        "        }\n"
+        "      } catch (csrfError) {}\n"
         "      if (body !== null && body !== undefined && body !== '') {\n"
         "        options.headers['Content-Type'] = 'application/json;charset=UTF-8';\n"
         "        options.body = body;\n"
@@ -628,6 +643,13 @@ void WebEnginePageBridge::request(const Request &req, Callback callback)
     // 由 requestScript() 安装的包装器自行建立通道并执行 fetch，
     // 因此这里只负责把参数传进去。
     // 同样使用拼接字面量而非原始字符串（原因见 requestScript 的注释）。
+    QJsonObject headersObject;
+    for (const auto &header : req.extraHeaders) {
+        headersObject.insert(header.first, header.second);
+    }
+    const QString headersLiteral =
+        QString::fromUtf8(QJsonDocument(headersObject).toJson(QJsonDocument::Compact));
+
     const QString bootstrap =
         QStringLiteral(
             "(function () {\n"
@@ -637,7 +659,7 @@ void WebEnginePageBridge::request(const Request &req, Callback callback)
             "  if (!window.qt || !window.qt.webChannelTransport) {\n"
             "    return 'transport-missing';\n"
             "  }\n"
-            "  window.__njulmsRequest(%1, %2, %3, %4);\n"
+            "  window.__njulmsRequest(%1, %2, %3, %4, %5);\n"
             "  return 'started';\n"
             "})();\n")
             .arg(QStringLiteral("'%1'").arg(id),
@@ -650,7 +672,8 @@ void WebEnginePageBridge::request(const Request &req, Callback callback)
                      : QStringLiteral("'%1'").arg(
                            QString(req.jsonBody)
                                .replace(QLatin1Char('\\'), QLatin1String("\\\\"))
-                               .replace(QLatin1Char('\''), QLatin1String("\\'"))));
+                               .replace(QLatin1Char('\''), QLatin1String("\\'"))),
+                 headersLiteral);
 
     d->page->runJavaScript(bootstrap, [this, id](const QVariant &result) {
         const QString status = result.toString();

@@ -2,8 +2,10 @@
 
 #include "auth/AuthManager.h"
 #include "adapters/ChaoxingAdapter.h"
+#include "adapters/YuketangAdapter.h"
 #include "parser/AssignmentParser.h"
 #include "sync/ChaoxingSyncRunner.h"
+#include "sync/YuketangSyncRunner.h"
 #include "ui/UiTheme.h"
 #include "utils/Logger.h"
 #include "utils/Redact.h"
@@ -266,6 +268,9 @@ QString sourceDisplay(const QString &source)
     if (source == QLatin1String("chaoxing")) {
         return QStringLiteral("学习通");
     }
+    if (source == QLatin1String("yuketang")) {
+        return QStringLiteral("雨课堂");
+    }
     return source.isEmpty() ? QStringLiteral("未知") : source;
 }
 
@@ -406,6 +411,8 @@ public:
     std::unique_ptr<ChaoxingSyncRunner> chaoxingSync;
     /// 雨课堂（yuketang.cn）：独立的站点页面桥（Cookie+JSON，见 setupYuketang）
     std::unique_ptr<WebEnginePageBridge> yuketangBridge;
+    std::unique_ptr<YuketangAdapter> yuketang;
+    std::unique_ptr<YuketangSyncRunner> yuketangSync;
 
     // 界面
     QTabWidget *tabs = nullptr;
@@ -454,6 +461,7 @@ public:
     /// 雨课堂登录状态行与登录窗口（阶段 0：先支持人工登录，采集随后接入）
     QLabel *yuketangAuthStatus = nullptr;
     QPushButton *openYuketangButton = nullptr;
+    QPushButton *checkYuketangButton = nullptr;
     LoginWindow *yuketangLoginWindow = nullptr;
 
     // 日志标签页
@@ -942,7 +950,7 @@ WebActionResult MainWindow::applyWebSettings(const QJsonObject &patch)
  */
 WebActionResult MainWindow::startWebSync(const QString &mode)
 {
-    if (d->sync->isRunning() || chaoxingBusy()) {
+    if (d->sync->isRunning() || chaoxingBusy() || yuketangBusy()) {
         return WebActionResult{false, 409, QStringLiteral("已有同步任务在运行"), {}};
     }
 
@@ -995,7 +1003,7 @@ WebActionResult MainWindow::resumeWebSync()
 
 WebActionResult MainWindow::cancelWebSync()
 {
-    if (!d->sync->isRunning() && !chaoxingBusy()) {
+    if (!d->sync->isRunning() && !chaoxingBusy() && !yuketangBusy()) {
         return WebActionResult{false, 409, QStringLiteral("当前没有正在进行的同步"), {}};
     }
     if (d->sync->isRunning()) {
@@ -1003,6 +1011,9 @@ WebActionResult MainWindow::cancelWebSync()
     }
     if (chaoxingBusy()) {
         d->chaoxingSync->cancel();
+    }
+    if (yuketangBusy()) {
+        d->yuketangSync->cancel();
     }
     appendLog(QStringLiteral("iPad 端取消了同步。"));
     updateActionStates();
@@ -1225,7 +1236,9 @@ void MainWindow::buildUi()
     yuketangAuthRow->addWidget(d->yuketangAuthStatus);
     yuketangAuthRow->addStretch();
     d->openYuketangButton = new QPushButton(QStringLiteral("打开雨课堂并登录"), authGroup);
+    d->checkYuketangButton = new QPushButton(QStringLiteral("检查雨课堂登录"), authGroup);
     yuketangAuthRow->addWidget(d->openYuketangButton);
+    yuketangAuthRow->addWidget(d->checkYuketangButton);
     authLayout->addLayout(yuketangAuthRow);
 
     leftColumn->addWidget(authGroup);
@@ -1754,12 +1767,15 @@ void MainWindow::wireSignals()
         updateActionStates();
     });
     connect(d->cancelButton, &QPushButton::clicked, this, [this]() {
-        // 南大与学习通是串行两段：取消时两段都取消（未开始的那段自然无操作）
+        // 南大 / 学习通 / 雨课堂是串行三段：取消时全部取消（未开始的自然无操作）
         if (d->sync->isRunning()) {
             d->sync->cancel();
         }
         if (chaoxingBusy()) {
             d->chaoxingSync->cancel();
+        }
+        if (yuketangBusy()) {
+            d->yuketangSync->cancel();
         }
         updateActionStates();
     });
@@ -2139,7 +2155,7 @@ void MainWindow::updateActionStates()
 {
     const bool njuRunning = d->sync->isRunning();
     const bool paused = d->sync->isPaused();
-    const bool busy = njuRunning || chaoxingBusy();
+    const bool busy = njuRunning || chaoxingBusy() || yuketangBusy();
 
     d->fullScanButton->setEnabled(!busy);
     d->incrementalButton->setEnabled(!busy);
@@ -2431,6 +2447,161 @@ void MainWindow::setupYuketang()
         d->yuketangBridge->loadHome();
         showYuketangLoginWindow(
             QStringLiteral("已打开雨课堂：请扫码或账号登录（首次使用需关注公众号），完成后可关闭窗口。"));
+    });
+
+    // ---- 适配器与同步运行器（阶段 1）------------------------------------
+    d->yuketang = std::make_unique<YuketangAdapter>(d->yuketangBridge.get());
+    d->yuketangSync =
+        std::make_unique<YuketangSyncRunner>(d->repository.get(), d->yuketang.get());
+
+    connect(d->checkYuketangButton, &QPushButton::clicked, this,
+            [this]() { checkYuketangSession(); });
+
+    connect(d->yuketangSync.get(), &YuketangSyncRunner::runStarted, this,
+            [this](qint64 runId, const QString &mode) {
+                Q_UNUSED(mode)
+                d->progress->setValue(0);
+                d->progressLabel->setText(
+                    QStringLiteral("雨课堂采集开始：正在获取课程列表（运行 #%1）").arg(runId));
+                d->yuketangAuthStatus->setText(QStringLiteral("采集中…"));
+                setLabelState(d->yuketangAuthStatus, "busy");
+                updateActionStates();
+            });
+    connect(d->yuketangSync.get(), &YuketangSyncRunner::progressChanged, this,
+            [this](int percent) {
+                if (yuketangBusy()) {
+                    d->progress->setValue(percent);
+                }
+            });
+    connect(d->yuketangSync.get(), &YuketangSyncRunner::statusMessage, this,
+            [this](const QString &message) {
+                d->progressLabel->setText(message);
+                statusBar()->showMessage(message, 10000);
+            });
+    connect(d->yuketangSync.get(), &YuketangSyncRunner::courseFinished, this,
+            [this](const QString &courseName, bool ok, const QString &detail) {
+                if (!ok) {
+                    appendLog(QStringLiteral("雨课堂课程「%1」：%2").arg(courseName, detail), true);
+                }
+            });
+    connect(d->yuketangSync.get(), &YuketangSyncRunner::loginRequired, this,
+            [this](const QString &reason) {
+                appendLog(QStringLiteral("雨课堂登录状态失效：%1").arg(reason), true);
+                d->yuketangAuthStatus->setText(QStringLiteral("需要登录"));
+                setLabelState(d->yuketangAuthStatus, "bad");
+                showYuketangLoginWindow(
+                    QStringLiteral("雨课堂需要登录：请在窗口中扫码或账号登录（完成后可关闭）。"));
+            });
+    connect(d->yuketangSync.get(), &YuketangSyncRunner::runFinished, this,
+            [this](YuketangSyncRunner::Outcome outcome, const QString &message, int succeeded,
+                   int failed) {
+                Q_UNUSED(succeeded)
+                Q_UNUSED(failed)
+                const bool isError = outcome == YuketangSyncRunner::Outcome::Failed
+                                     || outcome == YuketangSyncRunner::Outcome::WaitingForLogin;
+                appendLog(message, isError);
+                d->progressLabel->setText(message);
+                switch (outcome) {
+                case YuketangSyncRunner::Outcome::Success:
+                case YuketangSyncRunner::Outcome::Partial:
+                    d->progress->setValue(100);
+                    d->yuketangAuthStatus->setText(
+                        QStringLiteral("已登录（可访问 %1 门课程）")
+                            .arg(countYuketangPresentCourses()));
+                    setLabelState(d->yuketangAuthStatus, "good");
+                    if (d->yuketangLoginWindow != nullptr && d->yuketangLoginWindow->isVisible()) {
+                        d->yuketangLoginWindow->hide();
+                        appendLog(QStringLiteral("雨课堂登录有效，已自动隐藏登录窗口。"));
+                    }
+                    break;
+                case YuketangSyncRunner::Outcome::WaitingForLogin:
+                case YuketangSyncRunner::Outcome::Failed:
+                    if (outcome == YuketangSyncRunner::Outcome::Failed) {
+                        d->yuketangAuthStatus->setText(QStringLiteral("上次采集失败"));
+                        setLabelState(d->yuketangAuthStatus, "warn");
+                    }
+                    break;
+                case YuketangSyncRunner::Outcome::Cancelled:
+                    break;
+                }
+                loadPersistedData();
+                updateActionStates();
+            });
+
+    // 串行触发：学习通结束后接着采雨课堂（取消的那一轮不跟随）
+    connect(d->chaoxingSync.get(), &ChaoxingSyncRunner::runFinished, this,
+            [this](ChaoxingSyncRunner::Outcome outcome, const QString &, int, int, int) {
+                if (outcome == ChaoxingSyncRunner::Outcome::Cancelled) {
+                    return;
+                }
+                maybeStartYuketangSync();
+            });
+}
+
+bool MainWindow::yuketangBusy() const
+{
+    return d->yuketangSync != nullptr && d->yuketangSync->isRunning();
+}
+
+void MainWindow::maybeStartYuketangSync()
+{
+    if (d->yuketangSync == nullptr) {
+        return;
+    }
+    if (d->yuketangSync->isRunning()) {
+        return;
+    }
+    const QString mode = d->lastSyncMode == SyncManager::Mode::Full
+                             ? QStringLiteral("full")
+                             : QStringLiteral("incremental");
+    QString error;
+    if (!d->yuketangSync->start(mode, &error)) {
+        appendLog(QStringLiteral("雨课堂采集未启动：%1").arg(error), true);
+    }
+}
+
+int MainWindow::countYuketangPresentCourses() const
+{
+    int count = 0;
+    const QString yuketang = source_keys::kYuketang.toString();
+    for (const Course &course : d->repository->listCourses()) {
+        if (course.source == yuketang) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/// 「检查雨课堂登录」：只取一次课程列表判断会话，不写任何采集数据
+void MainWindow::checkYuketangSession()
+{
+    if (d->yuketang == nullptr) {
+        return;
+    }
+    if (yuketangBusy()) {
+        statusBar()->showMessage(QStringLiteral("雨课堂正在采集，稍后再检查"), 8000);
+        return;
+    }
+
+    d->yuketangAuthStatus->setText(QStringLiteral("检查中…"));
+    setLabelState(d->yuketangAuthStatus, "busy");
+    d->yuketang->discoverCourses([this](const YuketangAdapter::CourseListResult &result) {
+        if (result.error.ok()) {
+            d->yuketangAuthStatus->setText(
+                QStringLiteral("已登录（可访问 %1 门课程）").arg(result.courses.size()));
+            setLabelState(d->yuketangAuthStatus, "good");
+            return;
+        }
+        if (result.error.needsLogin()) {
+            d->yuketangAuthStatus->setText(QStringLiteral("需要登录"));
+            setLabelState(d->yuketangAuthStatus, "bad");
+            showYuketangLoginWindow(
+                QStringLiteral("雨课堂需要登录：请在窗口中扫码或账号登录。"));
+            return;
+        }
+        d->yuketangAuthStatus->setText(QStringLiteral("检查失败"));
+        setLabelState(d->yuketangAuthStatus, "warn");
+        appendLog(QStringLiteral("雨课堂登录检查失败：%1").arg(result.error.message), true);
     });
 }
 
