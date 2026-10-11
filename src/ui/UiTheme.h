@@ -39,9 +39,6 @@ struct Tokens
     QColor disabledText;
 };
 
-/// 当前是否深色（跟随系统；无法判断时按浅色处理）
-bool isDark();
-
 /// 当前主题的令牌
 const Tokens &tokens();
 

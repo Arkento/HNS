@@ -1,12 +1,14 @@
 # NjuLmsCrawler v2 · 智汇南雍作业采集与管理系统
 
-运行在 Windows 上的桌面程序：用 Qt WebEngine 打开南京大学「智汇南雍」（TronClass），
-由用户**手动**完成统一身份认证，然后在页面上下文里调用站点自身的 JSON 接口，
-把本人有权访问的课程与作业采集到本地 SQLite，支持增量同步、断点续传与定时同步。
+运行在 Windows 上的桌面程序：用 Qt WebEngine 打开三个学习站点
+（南京大学「智汇南雍」/ 学习通 / 雨课堂），由用户**手动**完成一次登录，
+然后在页面上下文里调用站点自身的接口，把本人有权访问的课程、**作业与考试**
+采集到本地 SQLite，支持增量同步、断点续传与定时同步；
+内置 iPad 前端（Safari 直接浏览、改设置、左滑删除/恢复单条作业）。
 
 - C++17 / CMake / Qt 6（Widgets + WebEngine + WebChannel）/ SQLite（Qt SQL）
-- 网站专属逻辑（接口路径、字段名）集中在 `NjuLmsAdapter` 与 `AssignmentParser`，
-  与数据库、调度、同步机制解耦
+- 网站专属逻辑（接口路径、字段名）集中在各自的 Adapter/Parser
+  （`NjuLmsAdapter` / `ChaoxingAdapter` / `YuketangAdapter`），与数据库、调度、同步机制解耦
 - 核心库 `njulms_core` 只依赖 Qt Core + Sql：没有 WebEngine 也能构建并跑完全部
   核心单元测试
 
@@ -26,8 +28,12 @@
 | 4 | 全量采集与断点续传、失败恢复、运行记录 | ✅ 已实现并通过测试 |
 | 5 | 增量同步（去重、更新变化字段） | ✅ 已实现并通过测试 |
 | 6 | 定时同步、暂停/继续/取消、进度与日志 | ✅ 已实现并通过测试 |
+| 7 | 多站点 · 学习通（超星）：作业与考试 | ✅ 已实现并真机验证（`docs/06-学习通探测.md`） |
+| 8 | 多站点 · 雨课堂（学堂在线）：作业与考试 | ✅ 已实现并真机验证（`docs/07-雨课堂探测.md`） |
+| 9 | iPad 前端：浏览 / 设置 / 令牌保护的写操作 / 离线外壳 | ✅ 已实现并真机验证（`docs/05-iPad前端.md`） |
+| 10 | 未提交单条软删除（左滑手势）+ 回收站恢复 + 动画体系 | ✅ 已实现并通过测试（`docs/03-v2变更记录.md` §29） |
 
-**测试：201 个用例全部通过（12 个测试套件，`ctest`）。**
+**测试：236 个用例全部通过（15 个测试套件，`ctest`）。**
 
 **真机验证已全部完成**（2026-10-09 晚）：登录、会话、接口、`page_size` 上限（服务端
 夹取到 100）、13 门课程字段契约、应用层全量 + 两次增量同步（第二轮起完全幂等，
@@ -198,13 +204,14 @@ ctest --test-dir build --output-on-failure
   设置项 `web/port` 改（0 = 关闭），环境变量 `NJULMS_WEB_PORT` 优先
 - **关窗口不再退出程序**：会缩到系统托盘继续跑（定时同步与 iPad 前端都靠它活着），
   要退出用托盘菜单的「退出程序」
-- 三个 tab：**未提交**（跨课程 todo 卡片，点开看作业内容与要求）、
-  **已提交**（按课程分组，点开按发布时间列出）、**设置**（周期、开关、手动增量/全量、
-  暂停/继续/取消、字号）
+- 四个 tab：**未提交**（跨课程 todo 卡片，点开看作业内容与要求；**左滑删除**单条，
+  松手未过触发线会回弹，已删除的 6 秒内可撤销）、**已提交**（按课程分组，点开按发布时间
+  列出）、**已删除**（软删除回收站，点「恢复」放回列表）、**设置**（周期、开关、
+  手动增量/全量、暂停/继续/取消、字号）
 - 页面默认**禁止缩放**（防误触），改字号在「设置 → 显示」；跟随系统深浅色、
   触摸目标 ≥44pt、适配安全区
 - 改设置与触发同步需要**访问令牌**（PC 托盘菜单「复制访问令牌」→ iPad 设置里粘贴一次）；
-  只读浏览不需要
+  只读浏览不需要（**例外**：单条作业的删除/恢复不需要令牌——删除是浏览动作的一部分）
 - 设置页底部有**危险操作 → 删除全部数据**：点击会弹警告窗列出会删/不会删的内容，
   勾选确认后才会真正删除（保留登录状态与日志；同步进行中会拒绝）
 - 作业胶囊右端的 **↗** 会在 **Safari** 里打开原站详情页（独立网页 app 不能加载外部网站，
@@ -297,6 +304,10 @@ UI：MainWindow（只显示与转发）
   SQLite 事务内，只有"能证明完整"的快照才推进断点。
 - **恢复 = 重新扫描全部课程**：整份快照写入幂等，重扫天然避免漏判。
 - **消失检测 = 软删除**：快照中消失的作业标记为不在场，保留历史。
+- **多站点**：学习通 / 雨课堂与南大走同一套 `IPageBridge` + 各自的
+  Adapter/Parser/SyncRunner；数据按 `source` 隔离，快照软删除只在本来源内生效。
+- **用户软删除独立于同步**：`user_deleted` 列由用户操作，"站点上还在不在"由
+  `present` 列由同步维护，互不干扰（同步不会复活用户删掉的条目）。
 
 ## 六、目录结构
 
@@ -305,20 +316,26 @@ UI：MainWindow（只显示与转发）
 ├─ docs/
 │  ├─ 00-可行性评估.md        可行性结论、实测证据、已知问题→修复对照
 │  ├─ 01-实现决策.md          设计理由与踩坑记录（改代码前必读）
-│  ├─ 02-阶段2验证结果.md     真机验证报告与字段契约审计（待人工登录复测）
-│  └─ 03-v2变更记录.md        v2 相对 v1 的变更与本次修复的真实缺陷
+│  ├─ 02-阶段2验证结果.md     真机验证报告与字段契约审计
+│  ├─ 03-v2变更记录.md        v2 以来的全部变更与真实缺陷修复（按节编号）
+│  ├─ 05-iPad前端.md          iPad 前端设计与接口（含软删除/动画交互）
+│  ├─ 06-学习通探测.md        学习通登录策略与接口探测
+│  ├─ 07-雨课堂探测.md        雨课堂登录策略与接口探测
+│  └─ images/                 界面截图（docs 中被引用的）
 ├─ src/
 │  ├─ models/     Course / Assignment / FieldState（三态标记）
-│  ├─ parser/     AssignmentParser（JSON → 模型）
+│  ├─ parser/     AssignmentParser / ChaoxingParser / YuketangParser（JSON → 模型）
 │  ├─ repository/ SqliteRepository（唯一 SQL 入口）
-│  ├─ adapters/   IPageBridge + NjuLmsAdapter
+│  ├─ adapters/   IPageBridge + NjuLmsAdapter / ChaoxingAdapter / YuketangAdapter
 │  ├─ auth/       AuthManager
-│  ├─ sync/       SyncManager
+│  ├─ sync/       SyncManager + ChaoxingSyncRunner / YuketangSyncRunner
 │  ├─ scheduler/  Scheduler
 │  ├─ utils/      Logger / Redact / TimeUtils / SingleInstanceLock
 │  ├─ browser/    WebEnginePageBridge（Qt WebEngine）
 │  ├─ ui/         MainWindow
+│  ├─ web/        WebApi / WebServer（iPad 前端接口；页面资源在 resources/web/）
 │  └─ app/        main.cpp
-├─ tests/         12 个测试套件（185 个用例）
-└─ tools/         真机验证工具（verify_live.cpp）
+├─ tests/         15 个测试套件（236 个用例，`ctest`）
+└─ tools/         真机验证（verify_live.cpp）、演示数据（demo_pending.py）、
+                  学习通接口探测（probe_chaoxing.js）
 ```

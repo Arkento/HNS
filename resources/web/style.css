@@ -29,16 +29,11 @@
   --tap: 2.75rem;          /* ≥44px */
   --base: 17px;            /* 字号基准，由 app.js 覆盖 */
 
-  /* 动画规范（与 app.js 里的 MOTION 常量一一对应，改一处要同步另一处）：
-     时长按"交互→条目→布局→页面"递增；缓动只有两条，避免各组件各写一套。
-     条目退出/入场、布局重排（FLIP）由 app.js 的 Web Animations API 执行，
-     这里只负责按压反馈与开关等纯 CSS 过渡。 */
+  /* 动画规范：条目增删 / 布局重排 / 页面转场的时长与缓动都在 app.js 的
+     MOTION 常量里（由 Web Animations API 执行）；这里只留纯 CSS 过渡用到的两条。
+     改时长/曲线时以 app.js 的 MOTION 为准，不要再散落新数字。 */
   --dur-press: 90ms;       /* 按钮按压（80–140ms） */
-  --dur-item: 240ms;       /* 列表条目增删（180–280ms） */
-  --dur-layout: 280ms;     /* 卡片重排 FLIP（220–350ms） */
-  --dur-page: 260ms;       /* tab 切换（250–400ms） */
   --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -427,9 +422,7 @@ main {
   background: var(--surface-alt);
   color: var(--muted);
 }
-.chip-good { color: var(--success); background: var(--success-soft); }
 .chip-bad { color: var(--danger); background: var(--danger-soft); }
-.chip-warn { color: var(--warning); background: var(--warning-bg); }
 /* 来源标签（南大 / 学习通）：低调的中性色，只用 accent 文字色区分站点 */
 .chip-source { color: var(--accent); background: var(--accent-soft); }
 

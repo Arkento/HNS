@@ -83,9 +83,9 @@ private:
     /// 清空采集数据（保留登录状态）；confirm 必须等于 "DELETE"
     WebActionResult purgeWebData(const QString &confirm);
 
-    /// 用户手动软删除 / 恢复一条作业（iPad 前端）
-    WebActionResult deleteWebAssignment(const QString &courseId, const QString &sourceId);
-    WebActionResult restoreWebAssignment(const QString &courseId, const QString &sourceId);
+    /// 用户手动软删除 / 恢复一条作业（iPad 前端；deleted 决定方向）
+    WebActionResult setWebAssignmentDeleted(const QString &courseId, const QString &sourceId,
+                                            bool deleted);
 
     /// 访问令牌（首次调用时生成并持久化）；只用于写操作
     QString webAccessToken();

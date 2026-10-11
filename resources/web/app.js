@@ -1425,15 +1425,8 @@ el('pending-list').addEventListener('lostpointercapture', (event) => {
   }
 });
 
-/// 撤销（恢复）一条刚删除的作业（提示条里的「撤销」）
-async function undoDelete(row) {
-  const result = await authPost('/api/assignments/restore', {
-    courseId: row.courseId,
-    sourceId: row.sourceId,
-  });
-  if (!result.ok) {
-    return;
-  }
+/// 恢复成功后的公共收尾：移出回收站、提示、拉一次权威列表（拿回服务端排序）
+function applyRestoreSuccess(row) {
   const key = pendingKey(row);
   state.deleted = state.deleted.filter((item) => pendingKey(item) !== key);
   if (state.deletedSnapshot) {
@@ -1441,9 +1434,19 @@ async function undoDelete(row) {
   }
   renderDeletedAnimated();
   toast(`已恢复「${row.title}」`);
-  // 未提交列表的排序由服务端决定（恢复要回到正确位置）：拉一次权威数据
   state.lastListsAt = 0;
   loadLists(true).catch(() => {});
+}
+
+/// 撤销（恢复）一条刚删除的作业（提示条里的「撤销」）
+async function undoDelete(row) {
+  const result = await authPost('/api/assignments/restore', {
+    courseId: row.courseId,
+    sourceId: row.sourceId,
+  });
+  if (result.ok) {
+    applyRestoreSuccess(row);
+  }
 }
 
 /**
@@ -1478,14 +1481,7 @@ async function restoreDeletedItem(card, key) {
 
   finishUiOp();
   card.remove();
-  state.deleted = state.deleted.filter((item) => pendingKey(item) !== key);
-  if (state.deletedSnapshot) {
-    state.deletedSnapshot.delete(key);
-  }
-  renderDeletedAnimated();
-  toast(`已恢复「${row.title}」`);
-  state.lastListsAt = 0;
-  loadLists(true).catch(() => {});
+  applyRestoreSuccess(row);
 }
 
 // 手动同步

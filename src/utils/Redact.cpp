@@ -176,11 +176,6 @@ void setMaskCourseIds(bool enabled)
     g_maskCourseIds = enabled;
 }
 
-bool maskCourseIds()
-{
-    return g_maskCourseIds;
-}
-
 QString courseId(const QString &id)
 {
     if (!g_maskCourseIds || id.isEmpty()) {

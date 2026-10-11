@@ -31,7 +31,6 @@ QString text(const QString &s, const QString &mask = QStringLiteral("***"));
 /// 课程 ID 是否需要在日志中脱敏。默认关闭：课程 ID 本身不是敏感信息，
 /// 但需求允许「如需，可进行脱敏」。保留开关便于将来按需启用。
 void setMaskCourseIds(bool enabled);
-bool maskCourseIds();
 
 /// 按当前设置格式化课程 ID
 QString courseId(const QString &id);

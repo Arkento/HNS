@@ -631,10 +631,10 @@ void MainWindow::startWebServer()
     sources.cancelSync = [this]() { return cancelWebSync(); };
     sources.purgeData = [this](const QString &confirm) { return purgeWebData(confirm); };
     sources.deleteAssignment = [this](const QString &courseId, const QString &sourceId) {
-        return deleteWebAssignment(courseId, sourceId);
+        return setWebAssignmentDeleted(courseId, sourceId, true);
     };
     sources.restoreAssignment = [this](const QString &courseId, const QString &sourceId) {
-        return restoreWebAssignment(courseId, sourceId);
+        return setWebAssignmentDeleted(courseId, sourceId, false);
     };
 
     d->webApi = std::make_unique<WebApi>(sources);
@@ -1101,33 +1101,26 @@ WebActionResult MainWindow::purgeWebData(const QString &confirm)
  *
  * 只改 user_deleted 标记，不删数据、不动同步断点；同步进行中也可以操作
  * （WebApi 已把请求排进主线程，和同步的写库天然串行，不存在并发写）。
+ * 删除与恢复是同一条链路，只有"置位 / 清位"的方向不同（deleted 参数）。
  */
-WebActionResult MainWindow::deleteWebAssignment(const QString &courseId, const QString &sourceId)
+WebActionResult MainWindow::setWebAssignmentDeleted(const QString &courseId,
+                                                    const QString &sourceId, bool deleted)
 {
     QString error;
     bool found = true;
-    if (!d->repository->setAssignmentUserDeleted(courseId, sourceId, true, &error, &found)) {
+    if (!d->repository->setAssignmentUserDeleted(courseId, sourceId, deleted, &error, &found)) {
         if (found) {
-            appendLog(QStringLiteral("iPad 端删除作业失败：%1").arg(error), true);
+            appendLog(QStringLiteral("iPad 端%1作业失败：%2")
+                          .arg(deleted ? QStringLiteral("删除") : QStringLiteral("恢复"), error),
+                      true);
         }
         return WebActionResult{false, found ? 500 : 404, error, {}};
     }
-    appendLog(QStringLiteral("iPad 端软删除了作业 %1（课程 %2）；同步不会将其复活，可在「已删除」恢复。")
-                  .arg(sourceId, courseId));
-    return WebActionResult{true, 200, {}, {}};
-}
-
-WebActionResult MainWindow::restoreWebAssignment(const QString &courseId, const QString &sourceId)
-{
-    QString error;
-    bool found = true;
-    if (!d->repository->setAssignmentUserDeleted(courseId, sourceId, false, &error, &found)) {
-        if (found) {
-            appendLog(QStringLiteral("iPad 端恢复作业失败：%1").arg(error), true);
-        }
-        return WebActionResult{false, found ? 500 : 404, error, {}};
-    }
-    appendLog(QStringLiteral("iPad 端恢复了作业 %1（课程 %2）。").arg(sourceId, courseId));
+    appendLog(deleted
+                  ? QStringLiteral("iPad 端软删除了作业 %1（课程 %2）；同步不会将其复活，"
+                                   "可在「已删除」恢复。")
+                        .arg(sourceId, courseId)
+                  : QStringLiteral("iPad 端恢复了作业 %1（课程 %2）。").arg(sourceId, courseId));
     return WebActionResult{true, 200, {}, {}};
 }
 

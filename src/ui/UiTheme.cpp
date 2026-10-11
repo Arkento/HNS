@@ -193,11 +193,6 @@ void applyOnce(QApplication *app)
 
 } // namespace
 
-bool isDark()
-{
-    return g_dark;
-}
-
 const Tokens &tokens()
 {
     return g_dark ? kDark : kLight;
