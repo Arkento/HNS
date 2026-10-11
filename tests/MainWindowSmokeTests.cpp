@@ -312,7 +312,8 @@ private slots:
      * v5：软删除端到端——真实 HTTP 接口 → MainWindow → SQLite → scope 过滤。
      *
      * 覆盖链路：未提交列表少一条 → 回收站（scope=deleted）多一条（带删除时间）→
-     * 恢复 → 两边一起还原。写接口不带令牌必须 401（与其它写操作一致）。
+     * 恢复 → 两边一起还原。删除/恢复**不需要令牌**（用户要求，与其它写操作不同），
+     * 这里全程不带令牌调用。
      */
     void softDeleteEndToEndOverHttp()
     {
@@ -322,12 +323,6 @@ private slots:
         qputenv("NJULMS_WEB_PORT", QByteArray::number(kPort));
 
         MainWindow window;
-
-        // 访问令牌由 MainWindow 启动时生成并写入 QSettings（测试里已重定向到临时 INI）
-        QSettings settings(QStringLiteral("NjuLmsCrawler"), QStringLiteral("NjuLmsCrawler"));
-        const QByteArray token =
-            settings.value(QStringLiteral("web/token")).toString().toUtf8();
-        QVERIFY(!token.isEmpty());
 
         const auto fetchScope = [](const QString &scope) {
             const auto response =
@@ -354,13 +349,9 @@ private slots:
         body.insert(QStringLiteral("sourceId"), sourceId);
         const QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
-        // 写接口必须带令牌
+        // 删除（**不带令牌**）：未提交 -1、回收站 +1（且带"删除于"时间）
         QCOMPARE(httpPost(45817, QStringLiteral("/api/assignments/delete"), payload, QByteArray())
                      .first,
-                 401);
-
-        // 删除：未提交 -1、回收站 +1（且带"删除于"时间）
-        QCOMPARE(httpPost(45817, QStringLiteral("/api/assignments/delete"), payload, token).first,
                  200);
         QCOMPARE(fetchScope(QStringLiteral("pending")).size(), pendingBefore.size() - 1);
         const QJsonArray deletedAfter = fetchScope(QStringLiteral("deleted"));
@@ -369,8 +360,9 @@ private slots:
         QCOMPARE(deletedAfter.first().toObject().value(QStringLiteral("sourceId")).toString(),
                  sourceId);
 
-        // 恢复：两边还原
-        QCOMPARE(httpPost(45817, QStringLiteral("/api/assignments/restore"), payload, token).first,
+        // 恢复（同样不带令牌）：两边还原
+        QCOMPARE(httpPost(45817, QStringLiteral("/api/assignments/restore"), payload, QByteArray())
+                     .first,
                  200);
         QCOMPARE(fetchScope(QStringLiteral("pending")).size(), pendingBefore.size());
         QCOMPARE(fetchScope(QStringLiteral("deleted")).size(), 0);

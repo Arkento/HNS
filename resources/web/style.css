@@ -233,6 +233,9 @@ main {
 .cards { display: grid; }
 .cards > .item { margin-bottom: 0.6rem; }
 .cards > .item:last-child { margin-bottom: 0; }
+/* 未提交列表的卡片外面套了一层滑动容器（.swipe）：间距挂在容器上 */
+.cards > .swipe { margin-bottom: 0.6rem; }
+.cards > .swipe:last-child { margin-bottom: 0; }
 .cards .empty { margin: 0; padding: 1.5rem 0; text-align: center; color: var(--muted); }
 
 .item {
@@ -244,6 +247,41 @@ main {
 
 /* 正在播放删除/恢复退场动画：不再接受任何点击（防重复触发） */
 .item.leaving { pointer-events: none; }
+
+/* ---------- 左滑删除（未提交列表）---------- */
+
+/* 滑动容器：竖向滚动照常交给浏览器，横向手势留给我们（见 app.js 的左滑小节） */
+.swipe {
+  position: relative;
+  touch-action: pan-y;
+}
+
+.swipe.dragging { cursor: grabbing; }
+
+/* 卡片底下的红色动作区：卡片左滑时露出来，透明度由拖动进度驱动 */
+.swipe-backing {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-card);
+  background: var(--danger);
+  color: var(--window);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 1.2rem;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.swipe-backing-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.swipe-backing svg { width: 1.3rem; height: 1.3rem; }
 
 .item.open { border-color: var(--accent); }
 
@@ -272,8 +310,8 @@ main {
 
 .item-toggle:active { background: var(--surface-alt); }
 
-/* 卡片行尾的独立点击区（跳原站↗ / 删除🗑）：不与「展开」冲突，≥44px 触摸区 */
-.item-jump, .item-del {
+/* 卡片行尾的独立点击区（跳原站↗）：不与「展开」冲突，≥44px 触摸区 */
+.item-jump {
   flex: 0 0 auto;
   align-self: stretch;
   width: var(--tap);
@@ -283,20 +321,17 @@ main {
   border: 0;
   border-left: 1px solid var(--border);
   background: transparent;
+  color: var(--accent);
   font: inherit;
+  font-size: 1.15rem;
   line-height: 1;
   cursor: pointer;
   transition: transform var(--dur-press) var(--ease-out),
               background-color 140ms var(--ease-out);
 }
 
-.item-jump { color: var(--accent); font-size: 1.15rem; }
 .item-jump:active { background: var(--accent-soft); }
 .item-jump[disabled] { color: var(--muted); opacity: 0.4; }
-
-.item-del { color: var(--danger); }
-.item-del svg { width: 1.25rem; height: 1.25rem; }
-.item-del:active { background: var(--danger-soft); }
 
 /* 「已删除」tab 行尾的恢复按钮（文字按钮，动作方向是"放回去"，用强调色） */
 .item-restore {
@@ -317,7 +352,7 @@ main {
 .item-restore:active { background: var(--accent-soft); }
 
 /* 图标按钮的按压反馈：轻微缩小（iOS 按钮的经典手感） */
-.item-jump:active, .item-del:active, .item-restore:active { transform: scale(0.94); }
+.item-jump:active, .item-restore:active { transform: scale(0.94); }
 
 .item-main { flex: 1; min-width: 0; display: grid; gap: 0.2rem; }
 .item-title { font-weight: 600; word-break: break-word; }
@@ -708,10 +743,9 @@ main {
   /* 按压反馈、tab/按钮状态过渡一律取消（app.js 里的条目增删/FLIP 动画
      由 motionQuery 判断后直接跳过） */
   .tab, .btn-plain, .btn-primary, .btn-danger, .segmented button,
-  .item-jump, .item-del, .item-restore {
+  .item-jump, .item-restore {
     transition: none;
   }
   .tab:active, .btn-plain:active, .btn-primary:active, .btn-danger:active,
-  .segmented button:active, .item-jump:active, .item-del:active,
-  .item-restore:active { transform: none; }
+  .segmented button:active, .item-jump:active, .item-restore:active { transform: none; }
 }

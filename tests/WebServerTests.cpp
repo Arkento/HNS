@@ -348,7 +348,7 @@ private slots:
         server.stop();
     }
 
-    /// v5：单条作业软删除 / 恢复接口——令牌、参数校验与后端裁决透传
+    /// v5：单条作业软删除 / 恢复接口——**不需要令牌**、参数校验与后端裁决透传
     void assignmentSoftDeleteEndpoints()
     {
         WebSources sources;
@@ -374,15 +374,15 @@ private slots:
 
         const QByteArray body = R"({"courseId":"90001","sourceId":"homework-1"})";
 
-        // 写操作必须带令牌
+        // ⚠️ 与其它写操作不同：**不带令牌也必须放行**（用户要求，删除属于浏览动作）
         QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/delete"), body,
                           QByteArray())
                      .first,
-                 401);
+                 200);
         QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/restore"), body,
                           QByteArray())
                      .first,
-                 401);
+                 200);
 
         // 缺字段 → 400（不进入后端）
         QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/delete"),
@@ -390,12 +390,8 @@ private slots:
                      .first,
                  400);
 
-        // 正常删除 / 恢复 → 200
+        // 带令牌同样可用（不冲突）
         QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/delete"), body,
-                          "secret-token")
-                     .first,
-                 200);
-        QCOMPARE(httpPost(server.port(), QStringLiteral("/api/assignments/restore"), body,
                           "secret-token")
                      .first,
                  200);

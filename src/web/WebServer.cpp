@@ -367,8 +367,12 @@ bool WebServer::start(quint16 port, QString *errorOut)
                            res, d->api->purgeData(body.value(QStringLiteral("confirm")).toString()));
                    });
 
-    // 单条作业的软删除 / 恢复（iPad「未提交 → 删除」「已删除 → 恢复」）。
-    // 与其它写操作一样要求令牌；只改 user_deleted 标记，数据保留在库里。
+    // 单条作业的软删除 / 恢复（iPad「未提交 → 左滑删除」「已删除 → 恢复」）。
+    //
+    // ⚠️ 与其它写操作不同：这两个接口**不要求访问令牌**（用户要求）——
+    // 删除/恢复是浏览列表的一部分动作，撤销链路也不应该被令牌挡住；
+    // 威胁模型仍然成立：只监听回环 + 仅 tailnet 可达，且它只改"显示与否"的
+    // 标记，不删数据、不影响采集与设置。
     const auto assignmentKeyFromBody =
         [](const QJsonObject &body, QString *courseId, QString *sourceId) -> bool {
         *courseId = body.value(QStringLiteral("courseId")).toString().trimmed();
@@ -377,11 +381,8 @@ bool WebServer::start(quint16 port, QString *errorOut)
     };
 
     d->server.Post("/api/assignments/delete",
-                   [this, authorized, assignmentKeyFromBody](const httplib::Request &req,
-                                                             httplib::Response &res) {
-                       if (!authorized(req, res)) {
-                           return;
-                       }
+                   [this, assignmentKeyFromBody](const httplib::Request &req,
+                                                 httplib::Response &res) {
                        QJsonObject body;
                        if (!readJsonBody(req, res, &body)) {
                            return;
@@ -397,11 +398,8 @@ bool WebServer::start(quint16 port, QString *errorOut)
                    });
 
     d->server.Post("/api/assignments/restore",
-                   [this, authorized, assignmentKeyFromBody](const httplib::Request &req,
-                                                             httplib::Response &res) {
-                       if (!authorized(req, res)) {
-                           return;
-                       }
+                   [this, assignmentKeyFromBody](const httplib::Request &req,
+                                                 httplib::Response &res) {
                        QJsonObject body;
                        if (!readJsonBody(req, res, &body)) {
                            return;

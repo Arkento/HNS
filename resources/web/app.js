@@ -68,6 +68,8 @@ const state = {
   runState: { id: 0, running: false },
   /// 正在播放的删除/恢复退场动画数：>0 时列表重建被挂起（见 renderDirty）
   uiOps: 0,
+  /// 正在进行的左滑手势（见"左滑删除手势"小节）；非空时也挂起列表重建
+  swipe: null,
   /// 哪些列表有"被挂起的重建"（数组更新了但没画），动画结束后统一补渲染
   renderDirty: { pending: false, deleted: false },
   /// 上一次真正渲染出来的 key 集合：新 key 播入场动画、老 key 做 FLIP 差分
@@ -369,7 +371,15 @@ const ICON_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
   + '<path d="M4 7h16M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/>'
   + '<path d="m6.5 7 .7 11.1A2 2 0 0 0 9.2 20h5.6a2 2 0 0 0 2-1.9L17.5 7"/></svg>';
 
-/// 未提交卡片（todo 样式；行尾多一个删除按钮）
+/**
+ * 未提交卡片（todo 样式）。
+ *
+ * 结构上是"滑动容器 + 卡片 + 底层动作区"：
+ *   * `.swipe` 是列表项本体（承担间距与塌缩动画），`touch-action: pan-y` 让竖向
+ *     滚动照常交给浏览器、横向拖动交给我们；
+ *   * `.swipe-backing` 是卡片底下的红色删除区，随左滑进度浮现；
+ *   * 卡片左滑由 pointer 事件驱动（见下方"左滑删除"小节）。
+ */
 function pendingItemHtml(row) {
   const key = pendingKey(row);
   const open = state.openPending.has(key);
@@ -379,43 +389,46 @@ function pendingItemHtml(row) {
     ? ` · <span class="countdown${row.dueUrgent ? ' urgent' : ''}">${escapeHtml(row.dueRelative)}</span>`
     : '';
   return `
-    <article class="item${open ? ' open' : ''}" data-key="${escapeHtml(key)}">
-      <div class="item-head">
-        <button class="item-toggle" type="button" aria-expanded="${open}">
-          ${kindTag(row)}
-          <span class="item-main">
-            <span class="item-title">${escapeHtml(row.title)}</span>
-            <span class="item-meta">截止 ${escapeHtml(row.dueAt || '未知')}${countdown}</span>
-            <span class="item-meta">${escapeHtml(row.courseName || '')}</span>
-          </span>
-          <span class="item-side">
-            ${row.sourceLabel
-              ? `<span class="chip chip-source">${escapeHtml(row.sourceLabel)}</span>` : ''}
-            ${overdue ? '<span class="chip chip-bad">已逾期</span>' : ''}
-            <span class="chev"></span>
-          </span>
-        </button>
-        ${jumpButton(row)}
-        <button class="item-del" type="button" data-del-key="${escapeHtml(key)}"
-                aria-label="删除这条作业（软删除，可在「已删除」恢复）">${ICON_TRASH}</button>
+    <div class="swipe" data-swipe-key="${escapeHtml(key)}">
+      <div class="swipe-backing" aria-hidden="true">
+        <span class="swipe-backing-label">${ICON_TRASH}<span>删除</span></span>
       </div>
-      <div class="collapse">
-        <div class="collapse-inner">
-          <div class="item-body">
-            <h3>作业内容与要求</h3>
-            ${descriptionHtml(row)}
-            <dl class="meta-grid">
-              <dt>课程</dt><dd>${escapeHtml(row.courseName || '')}</dd>
-              <dt>站点</dt><dd>${escapeHtml(row.sourceLabel || '未知')}</dd>
-              <dt>类型</dt><dd>${escapeHtml(row.kindLabel || '作业')}</dd>
-              <dt>状态</dt><dd>${escapeHtml(row.status)}</dd>
-              <dt>发布</dt><dd class="mono">${escapeHtml(row.publishedAt || '未知')}</dd>
-              <dt>来源</dt><dd class="mono">${escapeHtml(row.sourceId)}</dd>
-            </dl>
+      <article class="item${open ? ' open' : ''}" data-key="${escapeHtml(key)}">
+        <div class="item-head">
+          <button class="item-toggle" type="button" aria-expanded="${open}">
+            ${kindTag(row)}
+            <span class="item-main">
+              <span class="item-title">${escapeHtml(row.title)}</span>
+              <span class="item-meta">截止 ${escapeHtml(row.dueAt || '未知')}${countdown}</span>
+              <span class="item-meta">${escapeHtml(row.courseName || '')}</span>
+            </span>
+            <span class="item-side">
+              ${row.sourceLabel
+                ? `<span class="chip chip-source">${escapeHtml(row.sourceLabel)}</span>` : ''}
+              ${overdue ? '<span class="chip chip-bad">已逾期</span>' : ''}
+              <span class="chev"></span>
+            </span>
+          </button>
+          ${jumpButton(row)}
+        </div>
+        <div class="collapse">
+          <div class="collapse-inner">
+            <div class="item-body">
+              <h3>作业内容与要求</h3>
+              ${descriptionHtml(row)}
+              <dl class="meta-grid">
+                <dt>课程</dt><dd>${escapeHtml(row.courseName || '')}</dd>
+                <dt>站点</dt><dd>${escapeHtml(row.sourceLabel || '未知')}</dd>
+                <dt>类型</dt><dd>${escapeHtml(row.kindLabel || '作业')}</dd>
+                <dt>状态</dt><dd>${escapeHtml(row.status)}</dd>
+                <dt>发布</dt><dd class="mono">${escapeHtml(row.publishedAt || '未知')}</dd>
+                <dt>来源</dt><dd class="mono">${escapeHtml(row.sourceId)}</dd>
+              </dl>
+            </div>
           </div>
         </div>
-      </div>
-    </article>`;
+      </article>
+    </div>`;
 }
 
 /// 已删除卡片：与未提交同构，行尾按钮换成「恢复」，元信息带删除时间
@@ -562,7 +575,7 @@ function playExitBack(card, geo) {
  * 首屏不播入场动画；tab 不可见时也不播（切过去时直接是最终样式）。
  */
 function renderAnimatedList(cfg) {
-  if (state.uiOps > 0) {
+  if (state.uiOps > 0 || state.swipe) {
     state.renderDirty[cfg.dirtyProp] = true;
     return;
   }
@@ -601,7 +614,9 @@ function renderPendingAnimated() {
   const rows = state.pending;
   el('pending-count').textContent = rows.length ? String(rows.length) : '';
   el('pending-meta').textContent =
-    rows.length ? `临期（48 小时内）与已逾期优先 · 按截止时间由近到远 · ${rows.length} 条` : '';
+    rows.length
+      ? `临期（48 小时内）与已逾期优先 · 按截止时间由近到远 · 左滑删除 · ${rows.length} 条`
+      : '';
   renderAnimatedList({
     containerId: 'pending-list',
     rows,
@@ -951,9 +966,9 @@ function toggleCard(button, openSet) {
 }
 
 el('pending-list').addEventListener('click', (event) => {
-  const remove = event.target.closest('[data-del-key]');
-  if (remove) {
-    deletePendingItem(remove.closest('.item'), remove.dataset.delKey);
+  if (suppressClickNow()) {
+    event.preventDefault();
+    event.stopPropagation();
     return;
   }
   const button = event.target.closest('.item-toggle');
@@ -993,6 +1008,12 @@ el('submitted-list').addEventListener('click', (event) => {
 
 // 原站详情页（跳 Safari）：用捕获阶段处理，避免同时触发卡片的展开/收起
 document.addEventListener('click', (event) => {
+  if (suppressClickNow()) {
+    // 刚结束一次左滑拖动：这次 click 是拖动的尾巴，不是点击意图
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   const jump = event.target.closest('[data-detail-url]');
   if (!jump) {
     return;
@@ -1006,10 +1027,16 @@ document.addEventListener('click', (event) => {
 // 删除 / 恢复（软删除）
 // ---------------------------------------------------------------------------
 
-/** 写操作的公共错误处理；不加全局 busy 锁——删除要支持连续多张卡片操作 */
+/**
+ * 删除/恢复的公共请求封装。
+ *
+ * 注意：这两个接口**不要求访问令牌**（删除是浏览列表的一部分动作）；
+ * 如果本机配了令牌仍然带上（对服务端无影响，便于以后加回校验）。
+ * 不加全局 busy 锁——需要支持连续多张卡片操作。
+ */
 async function authPost(path, body) {
   try {
-    return { ok: true, data: await api(path, { method: 'POST', body, auth: true }) };
+    return { ok: true, data: await api(path, { method: 'POST', body, auth: Boolean(state.token) }) };
   } catch (error) {
     if (error.status === 401) {
       toast('访问令牌不对：请在「设置 → 访问令牌」里粘贴 PC 端托盘菜单复制的那串', true);
@@ -1020,10 +1047,15 @@ async function authPost(path, body) {
   }
 }
 
-/// 结束一个在途界面操作：全部结束后，把被挂起的列表渲染补上
-function finishUiOp() {
-  state.uiOps = Math.max(0, state.uiOps - 1);
-  if (state.uiOps > 0) {
+/// 滑动刚结束的一小段时间里吞掉 click（拖动松手不该触发展开/跳转）
+let suppressClickUntil = 0;
+function suppressClickNow() {
+  return performance.now() < suppressClickUntil;
+}
+
+/// 没有在途动画/拖动时，把被挂起的列表渲染补上
+function maybeFlushRenders() {
+  if (state.uiOps > 0 || state.swipe) {
     return;
   }
   if (state.renderDirty.pending) {
@@ -1036,6 +1068,12 @@ function finishUiOp() {
   }
 }
 
+/// 结束一个在途界面操作：全部结束后，把被挂起的列表渲染补上
+function finishUiOp() {
+  state.uiOps = Math.max(0, state.uiOps - 1);
+  maybeFlushRenders();
+}
+
 /// 本地"删除于"时间（iPad 本地时区即北京时间；服务端刷新后会用权威值替换）
 function localTimeDisplay() {
   const d = new Date();
@@ -1045,41 +1083,53 @@ function localTimeDisplay() {
 }
 
 /**
- * 删除一条未提交作业（软删除）。
+ * 删除一条未提交作业（软删除，左滑触发）。
  *
- * 动画与请求并行：点击立刻退场（不等网络），请求确认成功后才提交数据状态；
- * 失败则反向恢复并提示原因——不会出现"前端显示删掉了、服务端其实还在"。
+ * 动画与请求并行，且严格两段式（用户指定）：
+ *   ① 卡片若处于展开态，先"流体收拢"回原胶囊形态（高度收拢、展开体淡出、箭头还原）；
+ *   ② 拉伸飞出 + 渐隐（横向拉伸、圆角收到胶囊、容器塌缩让邻居连续补位）。
+ * 请求确认成功后才提交数据状态；失败则反向恢复并提示原因——
+ * 不会出现"前端显示删掉了、服务端其实还在"。
  */
-async function deletePendingItem(card, key) {
+async function deletePendingItem(card, key, options = {}) {
   if (!card || card.dataset.busy === '1') {
-    return;   // 同一张卡片重复点击：忽略（防重复删除）
+    return;   // 重复触发：忽略（防重复删除）
   }
   card.dataset.busy = '1';
+  const wrap = card.closest('.swipe');
   const row = state.pending.find((item) => pendingKey(item) === key);
   if (!row) {
-    card.remove();   // 数据已被后台轮询换掉：直接清理，不再发请求
-    return;
+    if (wrap) { wrap.remove(); } else { card.remove(); }
+    return;   // 数据已被后台轮询换掉：直接清理，不再发请求
   }
+  const startOffset = Math.max(0, options.startOffset || 0);
 
   state.uiOps += 1;
   const request = authPost('/api/assignments/delete', {
     courseId: row.courseId,
     sourceId: row.sourceId,
   });
-  const geo = await playExit(card);
-  const result = await request;
 
+  // ① 展开态 → 胶囊形态（流体收拢）
+  if (card.classList.contains('open')) {
+    await morphToCapsule(card);
+  }
+  // ② 拉伸飞出 + 渐隐，同时容器塌缩
+  const geo = await flyOut(card, wrap, startOffset);
+
+  const result = await request;
   if (!result.ok) {
+    restoreAfterFly(card, wrap, geo);
     card.dataset.busy = '0';
-    playExitBack(card, geo);
     finishUiOp();
     return;   // 失败原因已由 authPost 提示
   }
 
   finishUiOp();
-  // 服务端已确认：从未提交列表移除、放进回收站（本地即时一致；下一轮轮询以服务端为准）
-  card.remove();
+  // 服务端已确认：移除节点、更新本地状态（下一轮轮询以服务端为准）
+  if (wrap) { wrap.remove(); } else { card.remove(); }
   state.pending = state.pending.filter((item) => pendingKey(item) !== key);
+  state.openPending.delete(key);   // 展开集合也清掉，避免残留
   if (state.pendingSnapshot) {
     state.pendingSnapshot.delete(key);
   }
@@ -1093,6 +1143,293 @@ async function deletePendingItem(card, key) {
     onClick: () => undoDelete(copy),
   });
 }
+
+/**
+ * ① 流体收拢：展开卡片 → 原胶囊形态。
+ * 高度用 WAAPI 从当前尺寸收到"只有标题行"的尺寸（卡片自身 overflow:hidden，
+ * 内容被连续裁掉），展开体同步淡出，open 类移除让箭头与强调描边一起还原。
+ */
+function morphToCapsule(card) {
+  card.classList.remove('open');
+  if (reduceMotion()) {
+    return Promise.resolve();
+  }
+  const head = card.querySelector('.item-head');
+  const target = head ? head.offsetHeight + 2 : card.offsetHeight;   // + 上下 1px 描边
+  const from = card.offsetHeight;
+  if (from <= target + 2) {
+    return Promise.resolve();   // 本来就在胶囊尺寸附近
+  }
+  const animations = [
+    card.animate([{ height: `${from}px` }, { height: `${target}px` }],
+                 { duration: 220, easing: MOTION.easeInOut, fill: 'forwards' }),
+  ];
+  const collapse = card.querySelector('.collapse');
+  if (collapse) {
+    animations.push(collapse.animate([{ opacity: 1 }, { opacity: 0 }],
+                                     { duration: 140, easing: 'ease-out', fill: 'forwards' }));
+  }
+  card.__morphAnimations = animations;
+  return Promise.all(animations.map((anim) => anim.finished.catch(() => {})));
+}
+
+/**
+ * ② 拉伸飞出：卡片向左划出（横向略微拉伸 + 圆角收到胶囊 + 后半段渐隐），
+ * 容器（.swipe）同步塌缩高度与间距，下面的卡片连续补位。
+ * @return {Promise<{height:number, margin:number}|null>} 容器原尺寸（失败恢复用）
+ */
+function flyOut(card, wrap, startOffset) {
+  card.classList.add('leaving');
+  if (reduceMotion()) {
+    return Promise.resolve(null);
+  }
+  const width = card.getBoundingClientRect().width;
+  const radius = getComputedStyle(card).borderRadius || '12px';
+  const geo = wrap
+    ? { height: wrap.offsetHeight, margin: parseFloat(getComputedStyle(wrap).marginBottom) || 0 }
+    : null;
+
+  const fly = card.animate([
+    { transform: `translateX(${-startOffset}px)`, opacity: 1, borderRadius: radius },
+    { transform: `translateX(${-(width + 160)}px) scaleX(1.12) scaleY(0.96)`,
+      opacity: 0, borderRadius: '999px' },
+  ], { duration: 340, easing: 'cubic-bezier(0.45, 0, 0.85, 0.5)', fill: 'forwards' });
+  card.__exitAnimation = fly;
+
+  const jobs = [fly.finished.catch(() => {})];
+  if (wrap && geo) {
+    const collapse = wrap.animate([
+      { height: `${geo.height}px`, marginBottom: `${geo.margin}px` },
+      { height: '0px', marginBottom: '0px' },
+    ], { duration: 300, easing: MOTION.easeOut, fill: 'forwards' });
+    wrap.__collapseAnimation = collapse;
+    jobs.push(collapse.finished.catch(() => {}));
+  }
+  return Promise.all(jobs).then(() => geo);
+}
+
+/// 删除失败：取消飞出/塌缩/收拢，卡片带着一点回弹回到原位
+function restoreAfterFly(card, wrap, geo) {
+  if (card.__exitAnimation) {
+    card.__exitAnimation.cancel();
+    card.__exitAnimation = null;
+  }
+  if (wrap && wrap.__collapseAnimation) {
+    wrap.__collapseAnimation.cancel();
+    wrap.__collapseAnimation = null;
+  }
+  if (card.__morphAnimations) {
+    for (const anim of card.__morphAnimations) {
+      anim.cancel();
+    }
+    card.__morphAnimations = null;
+    if (state.openPending.has(card.dataset.key)) {
+      card.classList.add('open');   // 状态没提交过：展开态要还原
+    }
+  }
+  card.classList.remove('leaving');
+  const backing = wrap ? wrap.querySelector('.swipe-backing') : null;
+  if (backing) {
+    backing.style.opacity = '0';
+  }
+  if (reduceMotion()) {
+    card.style.transform = '';
+    return;
+  }
+  if (wrap && geo) {
+    wrap.animate([
+      { height: '0px', marginBottom: '0px' },
+      { height: `${geo.height}px`, marginBottom: `${geo.margin}px` },
+    ], { duration: 260, easing: MOTION.easeOut });
+  }
+  card.animate([
+    { opacity: 0.25, transform: 'translateX(-56px)' },
+    { opacity: 1, transform: 'translateX(0)' },
+  ], { duration: 260, easing: MOTION.easeOut }).finished.catch(() => {}).then(() => {
+    card.style.transform = '';
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 左滑删除手势（Pointer Events）
+//
+// 目标手感（用户指定）：跟手带阻尼、松手不过线就回弹、过线才触发删除。
+// 用 Pointer Events 而不是 Touch Events：同一套代码同时覆盖触屏与鼠标（PC 预览）。
+// `.swipe { touch-action: pan-y }` 把竖向滚动完全留给浏览器（一旦判定竖向就
+// 安全退出），横向手势才会作为 pointermove 流交给我们，不需要 preventDefault。
+// ---------------------------------------------------------------------------
+
+const SWIPE = {
+  engage: 8,             // 横向位移超过它才判定"在左滑"（轻点/竖向滚动不受影响）
+  flingVelocity: 0.5,    // px/ms：快速甩动可以少滑一点就触发
+  flingMinDistance: 48,  // 但至少滑过这么远（避免轻扫误删）
+  maxOverdrag: 110,      // 越过触发线之后还能再拉出的最大距离（阻尼段）
+};
+
+/// 触发删除所需的滑动距离：卡片宽度的 32%，夹在 [96, 240] px
+function swipeTriggerDistance(card) {
+  const width = card.getBoundingClientRect().width;
+  return Math.min(240, Math.max(96, width * 0.32));
+}
+
+/// 阻尼曲线：触发线以内 1:1 跟手；越线后指数逼近 +maxOverdrag（越拉越重）
+function dampedOffset(raw, trigger) {
+  if (raw <= trigger) {
+    return raw;
+  }
+  return trigger + SWIPE.maxOverdrag * (1 - Math.exp(-(raw - trigger) / SWIPE.maxOverdrag));
+}
+
+function swipeResetVisual(swipe) {
+  swipe.card.style.transform = '';
+  if (swipe.backing) {
+    swipe.backing.style.opacity = '0';
+  }
+}
+
+function onPendingPointerDown(event) {
+  if (state.swipe || state.uiOps > 0) {
+    return;   // 已有滑动/删除动画在途：忽略，避免互相打断
+  }
+  if (event.pointerType === 'mouse' && event.button !== 0) {
+    return;
+  }
+  const card = event.target.closest('.item[data-key]');
+  if (!card || card.dataset.busy === '1' || card.classList.contains('leaving')) {
+    return;
+  }
+  const wrap = card.closest('.swipe');
+  if (!wrap) {
+    return;   // 只有未提交列表带滑动容器
+  }
+  state.swipe = {
+    card,
+    wrap,
+    backing: wrap.querySelector('.swipe-backing'),
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    lastT: performance.now(),
+    velocity: 0,
+    raw: 0,
+    offset: 0,
+    dragging: false,
+  };
+  try {
+    card.setPointerCapture(event.pointerId);   // 手指滑出列表也能收到后续事件
+  } catch (error) {
+    // 指针已失效等边缘情况：忽略，靠 pointerup / pointercancel 兜底
+  }
+}
+
+function onPendingPointerMove(event) {
+  const swipe = state.swipe;
+  if (!swipe || event.pointerId !== swipe.pointerId) {
+    return;
+  }
+  const dx = event.clientX - swipe.startX;
+  const dy = event.clientY - swipe.startY;
+
+  if (!swipe.dragging) {
+    if (Math.abs(dy) > SWIPE.engage && Math.abs(dy) >= Math.abs(dx)) {
+      state.swipe = null;   // 竖向：让页面正常滚动
+      return;
+    }
+    if (-dx < SWIPE.engage || Math.abs(dx) < Math.abs(dy) * 1.1) {
+      return;   // 还没越过死区 / 往右拖（不处理）
+    }
+    swipe.dragging = true;
+    swipe.wrap.classList.add('dragging');
+  }
+
+  const now = performance.now();
+  const dt = Math.max(1, now - swipe.lastT);
+  // 指数平滑的速度估计（正值 = 向左甩）
+  swipe.velocity = 0.7 * swipe.velocity + 0.3 * ((swipe.lastX - event.clientX) / dt);
+  swipe.lastX = event.clientX;
+  swipe.lastT = now;
+
+  swipe.raw = Math.max(0, swipe.startX - event.clientX);
+  const trigger = swipeTriggerDistance(swipe.card);
+  swipe.offset = dampedOffset(swipe.raw, trigger);
+  swipe.card.style.transform = `translateX(${-swipe.offset.toFixed(1)}px)`;
+  if (swipe.backing) {
+    swipe.backing.style.opacity = String(Math.min(1, (swipe.offset / trigger) * 1.2));
+  }
+}
+
+function onPendingPointerUp(event) {
+  const swipe = state.swipe;
+  if (!swipe || event.pointerId !== swipe.pointerId) {
+    return;
+  }
+  state.swipe = null;
+  if (!swipe.dragging) {
+    return;   // 普通点击：交给 click（展开/收起、跳转）
+  }
+  swipe.wrap.classList.remove('dragging');
+  suppressClickUntil = performance.now() + 350;   // 拖动后的 click 一律吞掉
+
+  const trigger = swipeTriggerDistance(swipe.card);
+  const fling = swipe.velocity > SWIPE.flingVelocity && swipe.raw > SWIPE.flingMinDistance;
+  if (swipe.raw >= trigger || fling) {
+    deletePendingItem(swipe.card, swipe.card.dataset.key, { startOffset: swipe.offset });
+    return;
+  }
+  swipeSpringBack(swipe);
+}
+
+/// 没到位：松手回弹（缓动曲线带一点超调，就是那种"弹回来"的手感）
+function swipeSpringBack(swipe) {
+  if (reduceMotion()) {
+    swipeResetVisual(swipe);
+    maybeFlushRenders();
+    return;
+  }
+  state.uiOps += 1;   // 回弹也是动画：期间挂起列表重建
+  const animation = swipe.card.animate([
+    { transform: `translateX(${-swipe.offset.toFixed(1)}px)` },
+    { transform: 'translateX(0)' },
+  ], { duration: 300, easing: 'cubic-bezier(0.18, 1.25, 0.4, 1)' });
+  if (swipe.backing) {
+    swipe.backing.animate(
+      [{ opacity: swipe.backing.style.opacity || '0' }, { opacity: 0 }],
+      { duration: 200, easing: 'ease-out' });
+  }
+  animation.finished.catch(() => {}).then(() => {
+    swipeResetVisual(swipe);
+    finishUiOp();
+  });
+}
+
+/// 系统手势打断（开始滚动、来电等）：瞬时复位，不播动画
+function onPendingPointerCancel(event) {
+  const swipe = state.swipe;
+  if (!swipe || event.pointerId !== swipe.pointerId) {
+    return;
+  }
+  state.swipe = null;
+  swipe.wrap.classList.remove('dragging');
+  swipeResetVisual(swipe);
+  maybeFlushRenders();
+}
+
+el('pending-list').addEventListener('pointerdown', onPendingPointerDown);
+el('pending-list').addEventListener('pointermove', onPendingPointerMove);
+el('pending-list').addEventListener('pointerup', onPendingPointerUp);
+el('pending-list').addEventListener('pointercancel', onPendingPointerCancel);
+// 捕获丢失（节点被重建、指针被系统收走）：按时序这一定发生在 pointerup 之后，
+// 没结束的手势在这里兜底清理，避免残留状态挡住下一次滑动
+el('pending-list').addEventListener('lostpointercapture', (event) => {
+  const swipe = state.swipe;
+  if (swipe && event.pointerId === swipe.pointerId) {
+    state.swipe = null;
+    swipe.wrap.classList.remove('dragging');
+    swipeResetVisual(swipe);
+    maybeFlushRenders();
+  }
+});
 
 /// 撤销（恢复）一条刚删除的作业（提示条里的「撤销」）
 async function undoDelete(row) {
